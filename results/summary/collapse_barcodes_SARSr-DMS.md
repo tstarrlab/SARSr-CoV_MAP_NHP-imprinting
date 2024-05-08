@@ -1,0 +1,1670 @@
+Collapse barcodes to final per-RBD/mutant phenotype scores
+================
+Tyler Starr
+05/03/2024
+
+- <a href="#setup" id="toc-setup">Setup</a>
+- <a href="#calculate-per-variant-mean-scores"
+  id="toc-calculate-per-variant-mean-scores">Calculate per-variant mean
+  scores</a>
+- <a href="#expression-effects" id="toc-expression-effects">Expression
+  effects</a>
+- <a href="#heatmaps" id="toc-heatmaps">Heatmaps!</a>
+
+This notebook reads in the per-barcode sera binding AUCs and collapses
+barcodes to final mean binding for each variant, and generates some
+coverage and QC analyses. It also makes some heatmaps and other
+visualizations of these data.
+
+``` r
+require("knitr")
+knitr::opts_chunk$set(echo = T)
+knitr::opts_chunk$set(dev.args = list(png = list(type = "cairo")))
+
+#list of packages to install/load
+packages = c("yaml","data.table","tidyverse","gridExtra")
+#install any packages not already installed
+installed_packages <- packages %in% rownames(installed.packages())
+if(any(installed_packages == F)){
+  install.packages(packages[!installed_packages],
+                   lib=c(paste("/uufs/chpc.utah.edu/common/home/",Sys.getenv("USER"),"/RLibs/",Sys.getenv("R_VERSION"),sep="")),
+                   repos=c("http://cran.us.r-project.org"))
+}
+#load packages
+invisible(lapply(packages, library, character.only=T))
+
+
+#read in config file
+config <- read_yaml("config.yaml")
+
+#make output directory
+if(!file.exists(config$final_variant_scores_dir)){
+  dir.create(file.path(config$final_variant_scores_dir))
+}
+
+#read in file giving spike/RBD indexing concordance between backgrounds
+RBD_sites <- read.csv(file=config$RBD_annotation_file,stringsAsFactors=F)
+```
+
+Session info for reproducing environment:
+
+``` r
+sessionInfo()
+```
+
+    ## R version 4.1.3 (2022-03-10)
+    ## Platform: x86_64-pc-linux-gnu (64-bit)
+    ## Running under: Rocky Linux 8.8 (Green Obsidian)
+    ## 
+    ## Matrix products: default
+    ## BLAS/LAPACK: /uufs/chpc.utah.edu/sys/spack/linux-rocky8-nehalem/gcc-8.5.0/intel-oneapi-mkl-2021.4.0-h43nkmwzvaltaa6ii5l7n6e7ruvjbmnv/mkl/2021.4.0/lib/intel64/libmkl_rt.so.1
+    ## 
+    ## locale:
+    ##  [1] LC_CTYPE=en_US.UTF-8       LC_NUMERIC=C              
+    ##  [3] LC_TIME=en_US.UTF-8        LC_COLLATE=en_US.UTF-8    
+    ##  [5] LC_MONETARY=en_US.UTF-8    LC_MESSAGES=en_US.UTF-8   
+    ##  [7] LC_PAPER=en_US.UTF-8       LC_NAME=C                 
+    ##  [9] LC_ADDRESS=C               LC_TELEPHONE=C            
+    ## [11] LC_MEASUREMENT=en_US.UTF-8 LC_IDENTIFICATION=C       
+    ## 
+    ## attached base packages:
+    ## [1] stats     graphics  grDevices utils     datasets  methods   base     
+    ## 
+    ## other attached packages:
+    ##  [1] gridExtra_2.3     forcats_0.5.1     stringr_1.4.0     dplyr_1.0.8      
+    ##  [5] purrr_0.3.4       readr_2.1.2       tidyr_1.2.0       tibble_3.1.6     
+    ##  [9] ggplot2_3.4.1     tidyverse_1.3.1   data.table_1.14.2 yaml_2.3.5       
+    ## [13] knitr_1.37       
+    ## 
+    ## loaded via a namespace (and not attached):
+    ##  [1] tidyselect_1.1.2 xfun_0.30        haven_2.4.3      colorspace_2.0-3
+    ##  [5] vctrs_0.5.2      generics_0.1.2   htmltools_0.5.2  utf8_1.2.2      
+    ##  [9] rlang_1.0.6      pillar_1.7.0     glue_1.6.2       withr_2.5.0     
+    ## [13] DBI_1.1.2        dbplyr_2.1.1     modelr_0.1.8     readxl_1.3.1    
+    ## [17] lifecycle_1.0.3  munsell_0.5.0    gtable_0.3.0     cellranger_1.1.0
+    ## [21] rvest_1.0.2      evaluate_0.15    tzdb_0.2.0       fastmap_1.1.0   
+    ## [25] fansi_1.0.2      broom_0.7.12     Rcpp_1.0.11      backports_1.4.1 
+    ## [29] scales_1.2.1     jsonlite_1.8.7   fs_1.5.2         hms_1.1.1       
+    ## [33] digest_0.6.29    stringi_1.7.6    grid_4.1.3       cli_3.6.0       
+    ## [37] tools_4.1.3      magrittr_2.0.2   crayon_1.5.0     pkgconfig_2.0.3 
+    ## [41] ellipsis_0.3.2   xml2_1.3.3       reprex_2.0.1     lubridate_1.8.0 
+    ## [45] rstudioapi_0.13  assertthat_0.2.1 rmarkdown_2.13   httr_1.4.7      
+    ## [49] R6_2.5.1         compiler_4.1.3
+
+## Setup
+
+Read in tables of per-barcode sera AUC values, as well as the prior
+SARSr DMS data with expression effects of mutations.
+
+``` r
+dt <- data.table(read.csv(config$sera_delta_AUC_file),stringsAsFactors=F)[sublibrary!="lib61_SARSr-wts",]
+
+dt_expr1 <- data.table(read.csv(config$SARSr_lib40_mut_bind_expr),stringsAsFactors=F)[,.(target,wildtype,site,site_SARS2,mutant,mutation,mutation_SARS2,expression,expression_delta,n_bc_expression)]
+
+dt_expr2 <- data.table(read.csv(config$SARS2_WH1_BA2_mut_bind_expr),stringsAsFactors=F)[,.(target,wildtype,position,mutant,mutation,expr,delta_expr,n_bc_expr)]
+  
+#rename columns to merge
+dt_expr2[,site:=position]
+dt_expr2[,site_SARS2:=position]
+dt_expr2[,mutation_SARS2:=mutation]
+
+dt_expr1[,expr:=expression]
+dt_expr1[,delta_expr:=expression_delta]
+dt_expr1[,n_bc_expr:=n_bc_expression]
+
+#merge, using the Omi-associated WH1 expr measurements
+dt_expr <- rbind(dt_expr1[target %in% c("PRD-0038","SARS-CoV-1_Urbani"),.(target,wildtype,site,site_SARS2,mutant,mutation,mutation_SARS2,expr,delta_expr,n_bc_expr)],
+                 dt_expr2[target %in% c("Wuhan-Hu-1","Omicron_XBB15"),.(target,wildtype,site,site_SARS2,mutant,mutation,mutation_SARS2,expr,delta_expr,n_bc_expr)])
+rm(dt_expr1);rm(dt_expr2)
+
+#rename targets to match this repo
+dt_expr[target=="Wuhan-Hu-1",target:="SARS-CoV-2_WH1"]
+dt_expr[target=="Omicron_XBB15",target:="SARS-CoV-2_XBB15"]
+```
+
+## Calculate per-variant mean scores
+
+Calculate the mean binding score collapsed by genotype. Also output the
+number of barcodes across which a variant score was determined in each
+library.
+
+``` r
+dt[,mean_D5338.3_AUC:=mean(D5338.3_AUC,na.rm=T),by=c("library","target","aa_substitutions")]
+dt[,sd_D5338.3_AUC:=sd(D5338.3_AUC,na.rm=T),by=c("library","target","aa_substitutions")]
+dt[,n_bc_D5338.3_AUC:=sum(!is.na(D5338.3_AUC)),by=c("library","target","aa_substitutions")]
+
+dt[,mean_D6391.3_AUC:=mean(D6391.3_AUC,na.rm=T),by=c("library","target","aa_substitutions")]
+dt[,sd_D6391.3_AUC:=sd(D6391.3_AUC,na.rm=T),by=c("library","target","aa_substitutions")]
+dt[,n_bc_D6391.3_AUC:=sum(!is.na(D6391.3_AUC)),by=c("library","target","aa_substitutions")]
+
+dt[,mean_D6404.3_AUC:=mean(D6404.3_AUC,na.rm=T),by=c("library","target","aa_substitutions")]
+dt[,sd_D6404.3_AUC:=sd(D6404.3_AUC,na.rm=T),by=c("library","target","aa_substitutions")]
+dt[,n_bc_D6404.3_AUC:=sum(!is.na(D6404.3_AUC)),by=c("library","target","aa_substitutions")]
+
+dt[,mean_D5733.3_AUC:=mean(D5733.3_AUC,na.rm=T),by=c("library","target","aa_substitutions")]
+dt[,sd_D5733.3_AUC:=sd(D5733.3_AUC,na.rm=T),by=c("library","target","aa_substitutions")]
+dt[,n_bc_D5733.3_AUC:=sum(!is.na(D5733.3_AUC)),by=c("library","target","aa_substitutions")]
+
+dt[,mean_D6343.3_AUC:=mean(D6343.3_AUC,na.rm=T),by=c("library","target","aa_substitutions")]
+dt[,sd_D6343.3_AUC:=sd(D6343.3_AUC,na.rm=T),by=c("library","target","aa_substitutions")]
+dt[,n_bc_D6343.3_AUC:=sum(!is.na(D6343.3_AUC)),by=c("library","target","aa_substitutions")]
+
+dt[,mean_D6271.3_AUC:=mean(D6271.3_AUC,na.rm=T),by=c("library","target","aa_substitutions")]
+dt[,sd_D6271.3_AUC:=sd(D6271.3_AUC,na.rm=T),by=c("library","target","aa_substitutions")]
+dt[,n_bc_D6271.3_AUC:=sum(!is.na(D6271.3_AUC)),by=c("library","target","aa_substitutions")]
+
+dt[,mean_D5220.3_AUC:=mean(D5220.3_AUC,na.rm=T),by=c("library","target","aa_substitutions")]
+dt[,sd_D5220.3_AUC:=sd(D5220.3_AUC,na.rm=T),by=c("library","target","aa_substitutions")]
+dt[,n_bc_D5220.3_AUC:=sum(!is.na(D5220.3_AUC)),by=c("library","target","aa_substitutions")]
+
+dt[,mean_D5417.3_AUC:=mean(D5417.3_AUC,na.rm=T),by=c("library","target","aa_substitutions")]
+dt[,sd_D5417.3_AUC:=sd(D5417.3_AUC,na.rm=T),by=c("library","target","aa_substitutions")]
+dt[,n_bc_D5417.3_AUC:=sum(!is.na(D5417.3_AUC)),by=c("library","target","aa_substitutions")]
+
+dt[,mean_D5379.3_AUC:=mean(D5379.3_AUC,na.rm=T),by=c("library","target","aa_substitutions")]
+dt[,sd_D5379.3_AUC:=sd(D5379.3_AUC,na.rm=T),by=c("library","target","aa_substitutions")]
+dt[,n_bc_D5379.3_AUC:=sum(!is.na(D5379.3_AUC)),by=c("library","target","aa_substitutions")]
+
+dt[,mean_D5338.4_AUC:=mean(D5338.4_AUC,na.rm=T),by=c("library","target","aa_substitutions")]
+dt[,sd_D5338.4_AUC:=sd(D5338.4_AUC,na.rm=T),by=c("library","target","aa_substitutions")]
+dt[,n_bc_D5338.4_AUC:=sum(!is.na(D5338.4_AUC)),by=c("library","target","aa_substitutions")]
+
+dt[,mean_D6391.4_AUC:=mean(D6391.4_AUC,na.rm=T),by=c("library","target","aa_substitutions")]
+dt[,sd_D6391.4_AUC:=sd(D6391.4_AUC,na.rm=T),by=c("library","target","aa_substitutions")]
+dt[,n_bc_D6391.4_AUC:=sum(!is.na(D6391.4_AUC)),by=c("library","target","aa_substitutions")]
+
+dt[,mean_D6404.4_AUC:=mean(D6404.4_AUC,na.rm=T),by=c("library","target","aa_substitutions")]
+dt[,sd_D6404.4_AUC:=sd(D6404.4_AUC,na.rm=T),by=c("library","target","aa_substitutions")]
+dt[,n_bc_D6404.4_AUC:=sum(!is.na(D6404.4_AUC)),by=c("library","target","aa_substitutions")]
+
+dt[,mean_D5733.4_AUC:=mean(D5733.4_AUC,na.rm=T),by=c("library","target","aa_substitutions")]
+dt[,sd_D5733.4_AUC:=sd(D5733.4_AUC,na.rm=T),by=c("library","target","aa_substitutions")]
+dt[,n_bc_D5733.4_AUC:=sum(!is.na(D5733.4_AUC)),by=c("library","target","aa_substitutions")]
+
+dt[,mean_D6343.4_AUC:=mean(D6343.4_AUC,na.rm=T),by=c("library","target","aa_substitutions")]
+dt[,sd_D6343.4_AUC:=sd(D6343.4_AUC,na.rm=T),by=c("library","target","aa_substitutions")]
+dt[,n_bc_D6343.4_AUC:=sum(!is.na(D6343.4_AUC)),by=c("library","target","aa_substitutions")]
+
+dt[,mean_D6271.4_AUC:=mean(D6271.4_AUC,na.rm=T),by=c("library","target","aa_substitutions")]
+dt[,sd_D6271.4_AUC:=sd(D6271.4_AUC,na.rm=T),by=c("library","target","aa_substitutions")]
+dt[,n_bc_D6271.4_AUC:=sum(!is.na(D6271.4_AUC)),by=c("library","target","aa_substitutions")]
+
+dt[,mean_D5220.4_AUC:=mean(D5220.4_AUC,na.rm=T),by=c("library","target","aa_substitutions")]
+dt[,sd_D5220.4_AUC:=sd(D5220.4_AUC,na.rm=T),by=c("library","target","aa_substitutions")]
+dt[,n_bc_D5220.4_AUC:=sum(!is.na(D5220.4_AUC)),by=c("library","target","aa_substitutions")]
+
+dt[,mean_D5417.4_AUC:=mean(D5417.4_AUC,na.rm=T),by=c("library","target","aa_substitutions")]
+dt[,sd_D5417.4_AUC:=sd(D5417.4_AUC,na.rm=T),by=c("library","target","aa_substitutions")]
+dt[,n_bc_D5417.4_AUC:=sum(!is.na(D5417.4_AUC)),by=c("library","target","aa_substitutions")]
+
+dt[,mean_D5379.4_AUC:=mean(D5379.4_AUC,na.rm=T),by=c("library","target","aa_substitutions")]
+dt[,sd_D5379.4_AUC:=sd(D5379.4_AUC,na.rm=T),by=c("library","target","aa_substitutions")]
+dt[,n_bc_D5379.4_AUC:=sum(!is.na(D5379.4_AUC)),by=c("library","target","aa_substitutions")]
+
+dt <- unique(dt[,.(library,target,variant_class,aa_substitutions,n_aa_substitutions,
+                   mean_D5338.3_AUC, sd_D5338.3_AUC, n_bc_D5338.3_AUC,
+                   mean_D6391.3_AUC, sd_D6391.3_AUC, n_bc_D6391.3_AUC,
+                   mean_D6404.3_AUC, sd_D6404.3_AUC, n_bc_D6404.3_AUC,
+                   mean_D5733.3_AUC, sd_D5733.3_AUC, n_bc_D5733.3_AUC,
+                   mean_D6343.3_AUC, sd_D6343.3_AUC, n_bc_D6343.3_AUC,
+                   mean_D6271.3_AUC, sd_D6271.3_AUC, n_bc_D6271.3_AUC,
+                   mean_D5220.3_AUC, sd_D5220.3_AUC, n_bc_D5220.3_AUC,
+                   mean_D5417.3_AUC, sd_D5417.3_AUC, n_bc_D5417.3_AUC,
+                   mean_D5379.3_AUC, sd_D5379.3_AUC, n_bc_D5379.3_AUC,
+                   mean_D5338.4_AUC, sd_D5338.4_AUC, n_bc_D5338.4_AUC,
+                   mean_D6391.4_AUC, sd_D6391.4_AUC, n_bc_D6391.4_AUC,
+                   mean_D6404.4_AUC, sd_D6404.4_AUC, n_bc_D6404.4_AUC,
+                   mean_D5733.4_AUC, sd_D5733.4_AUC, n_bc_D5733.4_AUC,
+                   mean_D6343.4_AUC, sd_D6343.4_AUC, n_bc_D6343.4_AUC,
+                   mean_D6271.4_AUC, sd_D6271.4_AUC, n_bc_D6271.4_AUC,
+                   mean_D5220.4_AUC, sd_D5220.4_AUC, n_bc_D5220.4_AUC,
+                   mean_D5417.4_AUC, sd_D5417.4_AUC, n_bc_D5417.4_AUC,
+                   mean_D5379.4_AUC, sd_D5379.4_AUC, n_bc_D5379.4_AUC)])
+```
+
+Some QC plots. First, look at distribution of number barcodes for single
+mutant detemrinations. These are ‘left-justified’ histograms, so the
+leftmost bar represents the number of genotypes for which no barcodes
+were collapsed to final measurement in a pool.
+
+``` r
+par(mfrow=c(6,3))
+hist(dt[variant_class=="1 nonsynonymous",n_bc_D5338.3_AUC],main="D5338.3 sera",right=F,breaks=max(dt[variant_class=="1 nonsynonymous",n_bc_D5338.3_AUC],na.rm=T),xlab="")
+hist(dt[variant_class=="1 nonsynonymous",n_bc_D6391.3_AUC],main="D6391.3 sera",right=F,breaks=max(dt[variant_class=="1 nonsynonymous",n_bc_D6391.3_AUC],na.rm=T),xlab="")
+hist(dt[variant_class=="1 nonsynonymous",n_bc_D6404.3_AUC],main="D6404.3 sera",right=F,breaks=max(dt[variant_class=="1 nonsynonymous",n_bc_D6404.3_AUC],na.rm=T),xlab="")
+hist(dt[variant_class=="1 nonsynonymous",n_bc_D5733.3_AUC],main="D5733.3 sera",right=F,breaks=max(dt[variant_class=="1 nonsynonymous",n_bc_D5733.3_AUC],na.rm=T),xlab="")
+hist(dt[variant_class=="1 nonsynonymous",n_bc_D6343.3_AUC],main="D6343.3 sera",right=F,breaks=max(dt[variant_class=="1 nonsynonymous",n_bc_D6343.3_AUC],na.rm=T),xlab="")
+hist(dt[variant_class=="1 nonsynonymous",n_bc_D6271.3_AUC],main="D6271.3 sera",right=F,breaks=max(dt[variant_class=="1 nonsynonymous",n_bc_D6271.3_AUC],na.rm=T),xlab="")
+hist(dt[variant_class=="1 nonsynonymous",n_bc_D5220.3_AUC],main="D5220.3 sera",right=F,breaks=max(dt[variant_class=="1 nonsynonymous",n_bc_D5220.3_AUC],na.rm=T),xlab="")
+hist(dt[variant_class=="1 nonsynonymous",n_bc_D5417.3_AUC],main="D5417.3 sera",right=F,breaks=max(dt[variant_class=="1 nonsynonymous",n_bc_D5417.3_AUC],na.rm=T),xlab="")
+hist(dt[variant_class=="1 nonsynonymous",n_bc_D5379.3_AUC],main="D5379.3 sera",right=F,breaks=max(dt[variant_class=="1 nonsynonymous",n_bc_D5379.3_AUC],na.rm=T),xlab="")
+
+hist(dt[variant_class=="1 nonsynonymous",n_bc_D5338.4_AUC],main="D5338.4 sera",right=F,breaks=max(dt[variant_class=="1 nonsynonymous",n_bc_D5338.4_AUC],na.rm=T),xlab="")
+hist(dt[variant_class=="1 nonsynonymous",n_bc_D6391.4_AUC],main="D6391.4 sera",right=F,breaks=max(dt[variant_class=="1 nonsynonymous",n_bc_D6391.4_AUC],na.rm=T),xlab="")
+hist(dt[variant_class=="1 nonsynonymous",n_bc_D6404.4_AUC],main="D6404.4 sera",right=F,breaks=max(dt[variant_class=="1 nonsynonymous",n_bc_D6404.4_AUC],na.rm=T),xlab="")
+hist(dt[variant_class=="1 nonsynonymous",n_bc_D5733.4_AUC],main="D5733.4 sera",right=F,breaks=max(dt[variant_class=="1 nonsynonymous",n_bc_D5733.4_AUC],na.rm=T),xlab="")
+hist(dt[variant_class=="1 nonsynonymous",n_bc_D6343.4_AUC],main="D6343.4 sera",right=F,breaks=max(dt[variant_class=="1 nonsynonymous",n_bc_D6343.4_AUC],na.rm=T),xlab="")
+hist(dt[variant_class=="1 nonsynonymous",n_bc_D6271.4_AUC],main="D6271.4 sera",right=F,breaks=max(dt[variant_class=="1 nonsynonymous",n_bc_D6271.4_AUC],na.rm=T),xlab="")
+hist(dt[variant_class=="1 nonsynonymous",n_bc_D5220.4_AUC],main="D5220.4 sera",right=F,breaks=max(dt[variant_class=="1 nonsynonymous",n_bc_D5220.4_AUC],na.rm=T),xlab="")
+hist(dt[variant_class=="1 nonsynonymous",n_bc_D5417.4_AUC],main="D5417.4 sera",right=F,breaks=max(dt[variant_class=="1 nonsynonymous",n_bc_D5417.4_AUC],na.rm=T),xlab="")
+hist(dt[variant_class=="1 nonsynonymous",n_bc_D5379.4_AUC],main="D5379.4 sera",right=F,breaks=max(dt[variant_class=="1 nonsynonymous",n_bc_D5379.4_AUC],na.rm=T),xlab="")
+```
+
+<img src="collapse_barcodes_SARSr-DMS_files/figure-gfm/hist_n_bc_per_mutant-1.png" style="display: block; margin: auto;" />
+
+What about how SEM tracks with number of barcodes collapsed? This could
+help for choosing a minimum number of barcodes to use or an SEM cutoff.
+List fraction above SEM 0.5 on each plot.
+
+``` r
+par(mfrow=c(3,3))
+plot(dt[variant_class=="1 nonsynonymous",n_bc_D5338.3_AUC],
+     dt[variant_class=="1 nonsynonymous",sd_D5338.3_AUC/sqrt(n_bc_D5338.3_AUC)],
+     pch=16,col="#00000005",main="D5338.3 sera",ylab="SEM",xlab="number barcodes collapsed")
+abline(h=0.5,col="red",lty=2)
+legend("topleft",bty="n",cex=1,legend=paste(format(100*nrow(dt[variant_class=="1 nonsynonymous" & sd_D5338.3_AUC/sqrt(n_bc_D5338.3_AUC) > 0.5 & !is.na(mean_D5338.3_AUC),])/nrow(dt[variant_class=="1 nonsynonymous" & !is.na(mean_D5338.3_AUC),]),digits=3),"%"))
+
+plot(dt[variant_class=="1 nonsynonymous",n_bc_D6391.3_AUC],
+     dt[variant_class=="1 nonsynonymous",sd_D6391.3_AUC/sqrt(n_bc_D6391.3_AUC)],
+     pch=16,col="#00000005",main="D6391.3 sera",ylab="SEM",xlab="number barcodes collapsed")
+abline(h=0.5,col="red",lty=2)
+legend("topleft",bty="n",cex=1,legend=paste(format(100*nrow(dt[variant_class=="1 nonsynonymous" & sd_D6391.3_AUC/sqrt(n_bc_D6391.3_AUC) > 0.5 & !is.na(mean_D6391.3_AUC),])/nrow(dt[variant_class=="1 nonsynonymous" & !is.na(mean_D6391.3_AUC),]),digits=3),"%"))
+
+plot(dt[variant_class=="1 nonsynonymous",n_bc_D6404.3_AUC],
+     dt[variant_class=="1 nonsynonymous",sd_D6404.3_AUC/sqrt(n_bc_D6404.3_AUC)],
+     pch=16,col="#00000005",main="D6404.3 sera",ylab="SEM",xlab="number barcodes collapsed")
+abline(h=0.5,col="red",lty=2)
+legend("topleft",bty="n",cex=1,legend=paste(format(100*nrow(dt[variant_class=="1 nonsynonymous" & sd_D6404.3_AUC/sqrt(n_bc_D6404.3_AUC) > 0.5 & !is.na(mean_D6404.3_AUC),])/nrow(dt[variant_class=="1 nonsynonymous" & !is.na(mean_D6404.3_AUC),]),digits=3),"%"))
+
+plot(dt[variant_class=="1 nonsynonymous",n_bc_D5733.3_AUC],
+     dt[variant_class=="1 nonsynonymous",sd_D5733.3_AUC/sqrt(n_bc_D5733.3_AUC)],
+     pch=16,col="#00000005",main="D5733.3 sera",ylab="SEM",xlab="number barcodes collapsed")
+abline(h=0.5,col="red",lty=2)
+legend("topleft",bty="n",cex=1,legend=paste(format(100*nrow(dt[variant_class=="1 nonsynonymous" & sd_D5733.3_AUC/sqrt(n_bc_D5733.3_AUC) > 0.5 & !is.na(mean_D5733.3_AUC),])/nrow(dt[variant_class=="1 nonsynonymous" & !is.na(mean_D5733.3_AUC),]),digits=3),"%"))
+
+plot(dt[variant_class=="1 nonsynonymous",n_bc_D6343.3_AUC],
+     dt[variant_class=="1 nonsynonymous",sd_D6343.3_AUC/sqrt(n_bc_D6343.3_AUC)],
+     pch=16,col="#00000005",main="D6343.3 sera",ylab="SEM",xlab="number barcodes collapsed")
+abline(h=0.5,col="red",lty=2)
+legend("topleft",bty="n",cex=1,legend=paste(format(100*nrow(dt[variant_class=="1 nonsynonymous" & sd_D6343.3_AUC/sqrt(n_bc_D6343.3_AUC) > 0.5 & !is.na(mean_D6343.3_AUC),])/nrow(dt[variant_class=="1 nonsynonymous" & !is.na(mean_D6343.3_AUC),]),digits=3),"%"))
+
+plot(dt[variant_class=="1 nonsynonymous",n_bc_D6271.3_AUC],
+     dt[variant_class=="1 nonsynonymous",sd_D6271.3_AUC/sqrt(n_bc_D6271.3_AUC)],
+     pch=16,col="#00000005",main="D6271.3 sera",ylab="SEM",xlab="number barcodes collapsed")
+abline(h=0.5,col="red",lty=2)
+legend("topleft",bty="n",cex=1,legend=paste(format(100*nrow(dt[variant_class=="1 nonsynonymous" & sd_D6271.3_AUC/sqrt(n_bc_D6271.3_AUC) > 0.5 & !is.na(mean_D6271.3_AUC),])/nrow(dt[variant_class=="1 nonsynonymous" & !is.na(mean_D6271.3_AUC),]),digits=3),"%"))
+
+plot(dt[variant_class=="1 nonsynonymous",n_bc_D5220.3_AUC],
+     dt[variant_class=="1 nonsynonymous",sd_D5220.3_AUC/sqrt(n_bc_D5220.3_AUC)],
+     pch=16,col="#00000005",main="D5220.3 sera",ylab="SEM",xlab="number barcodes collapsed")
+abline(h=0.5,col="red",lty=2)
+legend("topleft",bty="n",cex=1,legend=paste(format(100*nrow(dt[variant_class=="1 nonsynonymous" & sd_D5220.3_AUC/sqrt(n_bc_D5220.3_AUC) > 0.5 & !is.na(mean_D5220.3_AUC),])/nrow(dt[variant_class=="1 nonsynonymous" & !is.na(mean_D5220.3_AUC),]),digits=3),"%"))
+
+plot(dt[variant_class=="1 nonsynonymous",n_bc_D5417.3_AUC],
+     dt[variant_class=="1 nonsynonymous",sd_D5417.3_AUC/sqrt(n_bc_D5417.3_AUC)],
+     pch=16,col="#00000005",main="D5417.3 sera",ylab="SEM",xlab="number barcodes collapsed")
+abline(h=0.5,col="red",lty=2)
+legend("topleft",bty="n",cex=1,legend=paste(format(100*nrow(dt[variant_class=="1 nonsynonymous" & sd_D5417.3_AUC/sqrt(n_bc_D5417.3_AUC) > 0.5 & !is.na(mean_D5417.3_AUC),])/nrow(dt[variant_class=="1 nonsynonymous" & !is.na(mean_D5417.3_AUC),]),digits=3),"%"))
+
+plot(dt[variant_class=="1 nonsynonymous",n_bc_D5379.3_AUC],
+     dt[variant_class=="1 nonsynonymous",sd_D5379.3_AUC/sqrt(n_bc_D5379.3_AUC)],
+     pch=16,col="#00000005",main="D5379.3 sera",ylab="SEM",xlab="number barcodes collapsed")
+abline(h=0.5,col="red",lty=2)
+legend("topleft",bty="n",cex=1,legend=paste(format(100*nrow(dt[variant_class=="1 nonsynonymous" & sd_D5379.3_AUC/sqrt(n_bc_D5379.3_AUC) > 0.5 & !is.na(mean_D5379.3_AUC),])/nrow(dt[variant_class=="1 nonsynonymous" & !is.na(mean_D5379.3_AUC),]),digits=3),"%"))
+```
+
+<img src="collapse_barcodes_SARSr-DMS_files/figure-gfm/sem_v_n-bc.3-1.png" style="display: block; margin: auto;" />
+
+``` r
+invisible(dev.print(pdf, paste(config$final_variant_scores_dir,"/lib40_sem_v_n-bc.3.pdf",sep=""),useDingbats=F))
+```
+
+``` r
+par(mfrow=c(3,3))
+plot(dt[variant_class=="1 nonsynonymous",n_bc_D5338.4_AUC],
+     dt[variant_class=="1 nonsynonymous",sd_D5338.4_AUC/sqrt(n_bc_D5338.4_AUC)],
+     pch=16,col="#00000005",main="D5338.4 sera",ylab="SEM",xlab="number barcodes collapsed")
+abline(h=0.5,col="red",lty=2)
+legend("topleft",bty="n",cex=1,legend=paste(format(100*nrow(dt[variant_class=="1 nonsynonymous" & sd_D5338.4_AUC/sqrt(n_bc_D5338.4_AUC) > 0.5 & !is.na(mean_D5338.4_AUC),])/nrow(dt[variant_class=="1 nonsynonymous" & !is.na(mean_D5338.4_AUC),]),digits=3),"%"))
+
+plot(dt[variant_class=="1 nonsynonymous",n_bc_D6391.4_AUC],
+     dt[variant_class=="1 nonsynonymous",sd_D6391.4_AUC/sqrt(n_bc_D6391.4_AUC)],
+     pch=16,col="#00000005",main="D6391.4 sera",ylab="SEM",xlab="number barcodes collapsed")
+abline(h=0.5,col="red",lty=2)
+legend("topleft",bty="n",cex=1,legend=paste(format(100*nrow(dt[variant_class=="1 nonsynonymous" & sd_D6391.4_AUC/sqrt(n_bc_D6391.4_AUC) > 0.5 & !is.na(mean_D6391.4_AUC),])/nrow(dt[variant_class=="1 nonsynonymous" & !is.na(mean_D6391.4_AUC),]),digits=3),"%"))
+
+plot(dt[variant_class=="1 nonsynonymous",n_bc_D6404.4_AUC],
+     dt[variant_class=="1 nonsynonymous",sd_D6404.4_AUC/sqrt(n_bc_D6404.4_AUC)],
+     pch=16,col="#00000005",main="D6404.4 sera",ylab="SEM",xlab="number barcodes collapsed")
+abline(h=0.5,col="red",lty=2)
+legend("topleft",bty="n",cex=1,legend=paste(format(100*nrow(dt[variant_class=="1 nonsynonymous" & sd_D6404.4_AUC/sqrt(n_bc_D6404.4_AUC) > 0.5 & !is.na(mean_D6404.4_AUC),])/nrow(dt[variant_class=="1 nonsynonymous" & !is.na(mean_D6404.4_AUC),]),digits=3),"%"))
+
+plot(dt[variant_class=="1 nonsynonymous",n_bc_D5733.4_AUC],
+     dt[variant_class=="1 nonsynonymous",sd_D5733.4_AUC/sqrt(n_bc_D5733.4_AUC)],
+     pch=16,col="#00000005",main="D5733.4 sera",ylab="SEM",xlab="number barcodes collapsed")
+abline(h=0.5,col="red",lty=2)
+legend("topleft",bty="n",cex=1,legend=paste(format(100*nrow(dt[variant_class=="1 nonsynonymous" & sd_D5733.4_AUC/sqrt(n_bc_D5733.4_AUC) > 0.5 & !is.na(mean_D5733.4_AUC),])/nrow(dt[variant_class=="1 nonsynonymous" & !is.na(mean_D5733.4_AUC),]),digits=3),"%"))
+
+plot(dt[variant_class=="1 nonsynonymous",n_bc_D6343.4_AUC],
+     dt[variant_class=="1 nonsynonymous",sd_D6343.4_AUC/sqrt(n_bc_D6343.4_AUC)],
+     pch=16,col="#00000005",main="D6343.4 sera",ylab="SEM",xlab="number barcodes collapsed")
+abline(h=0.5,col="red",lty=2)
+legend("topleft",bty="n",cex=1,legend=paste(format(100*nrow(dt[variant_class=="1 nonsynonymous" & sd_D6343.4_AUC/sqrt(n_bc_D6343.4_AUC) > 0.5 & !is.na(mean_D6343.4_AUC),])/nrow(dt[variant_class=="1 nonsynonymous" & !is.na(mean_D6343.4_AUC),]),digits=3),"%"))
+
+plot(dt[variant_class=="1 nonsynonymous",n_bc_D6271.4_AUC],
+     dt[variant_class=="1 nonsynonymous",sd_D6271.4_AUC/sqrt(n_bc_D6271.4_AUC)],
+     pch=16,col="#00000005",main="D6271.4 sera",ylab="SEM",xlab="number barcodes collapsed")
+abline(h=0.5,col="red",lty=2)
+legend("topleft",bty="n",cex=1,legend=paste(format(100*nrow(dt[variant_class=="1 nonsynonymous" & sd_D6271.4_AUC/sqrt(n_bc_D6271.4_AUC) > 0.5 & !is.na(mean_D6271.4_AUC),])/nrow(dt[variant_class=="1 nonsynonymous" & !is.na(mean_D6271.4_AUC),]),digits=3),"%"))
+
+plot(dt[variant_class=="1 nonsynonymous",n_bc_D5220.4_AUC],
+     dt[variant_class=="1 nonsynonymous",sd_D5220.4_AUC/sqrt(n_bc_D5220.4_AUC)],
+     pch=16,col="#00000005",main="D5220.4 sera",ylab="SEM",xlab="number barcodes collapsed")
+abline(h=0.5,col="red",lty=2)
+legend("topleft",bty="n",cex=1,legend=paste(format(100*nrow(dt[variant_class=="1 nonsynonymous" & sd_D5220.4_AUC/sqrt(n_bc_D5220.4_AUC) > 0.5 & !is.na(mean_D5220.4_AUC),])/nrow(dt[variant_class=="1 nonsynonymous" & !is.na(mean_D5220.4_AUC),]),digits=3),"%"))
+
+plot(dt[variant_class=="1 nonsynonymous",n_bc_D5417.4_AUC],
+     dt[variant_class=="1 nonsynonymous",sd_D5417.4_AUC/sqrt(n_bc_D5417.4_AUC)],
+     pch=16,col="#00000005",main="D5417.4 sera",ylab="SEM",xlab="number barcodes collapsed")
+abline(h=0.5,col="red",lty=2)
+legend("topleft",bty="n",cex=1,legend=paste(format(100*nrow(dt[variant_class=="1 nonsynonymous" & sd_D5417.4_AUC/sqrt(n_bc_D5417.4_AUC) > 0.5 & !is.na(mean_D5417.4_AUC),])/nrow(dt[variant_class=="1 nonsynonymous" & !is.na(mean_D5417.4_AUC),]),digits=3),"%"))
+
+plot(dt[variant_class=="1 nonsynonymous",n_bc_D5379.4_AUC],
+     dt[variant_class=="1 nonsynonymous",sd_D5379.4_AUC/sqrt(n_bc_D5379.4_AUC)],
+     pch=16,col="#00000005",main="D5379.4 sera",ylab="SEM",xlab="number barcodes collapsed")
+abline(h=0.5,col="red",lty=2)
+legend("topleft",bty="n",cex=1,legend=paste(format(100*nrow(dt[variant_class=="1 nonsynonymous" & sd_D5379.4_AUC/sqrt(n_bc_D5379.4_AUC) > 0.5 & !is.na(mean_D5379.4_AUC),])/nrow(dt[variant_class=="1 nonsynonymous" & !is.na(mean_D5379.4_AUC),]),digits=3),"%"))
+```
+
+<img src="collapse_barcodes_SARSr-DMS_files/figure-gfm/sem_v_n-bc.4-1.png" style="display: block; margin: auto;" />
+
+``` r
+invisible(dev.print(pdf, paste(config$final_variant_scores_dir,"/lib40_sem_v_n-bc.4.pdf",sep=""),useDingbats=F))
+```
+
+Format into a ‘mutation lookup table’, where we focus just on the single
+mutants (and wildtype), breakup the string of mutations, and fill in the
+table to also include any missing mutants. We also provide indexing of
+sites according to SARS2 numbering and my alignment and according to
+“self” numbering
+
+``` r
+dt_mutant <- dt[variant_class %in% "1 nonsynonymous",]
+
+#split mutation string
+#define function to apply
+split_mut <- function(x){
+  split <- strsplit(x,split="")[[1]]
+  return(list(split[1],as.numeric(paste(split[2:(length(split)-1)],collapse="")),split[length(split)]))
+}
+dt_mutant[,c("wildtype","position","mutant"):=split_mut(as.character(aa_substitutions)),by=aa_substitutions]
+
+dt_mutant <- dt_mutant[,.(library,target,wildtype,position,mutant,
+                          mean_D5338.3_AUC,sd_D5338.3_AUC,n_bc_D5338.3_AUC,
+                          mean_D6391.3_AUC,sd_D6391.3_AUC,n_bc_D6391.3_AUC,
+                          mean_D6404.3_AUC,sd_D6404.3_AUC,n_bc_D6404.3_AUC,
+                          mean_D5733.3_AUC,sd_D5733.3_AUC,n_bc_D5733.3_AUC,
+                          mean_D6343.3_AUC,sd_D6343.3_AUC,n_bc_D6343.3_AUC,
+                          mean_D6271.3_AUC,sd_D6271.3_AUC,n_bc_D6271.3_AUC,
+                          mean_D5220.3_AUC,sd_D5220.3_AUC,n_bc_D5220.3_AUC,
+                          mean_D5417.3_AUC,sd_D5417.3_AUC,n_bc_D5417.3_AUC,
+                          mean_D5379.3_AUC,sd_D5379.3_AUC,n_bc_D5379.3_AUC,
+                          mean_D5338.4_AUC,sd_D5338.4_AUC,n_bc_D5338.4_AUC,
+                          mean_D6391.4_AUC,sd_D6391.4_AUC,n_bc_D6391.4_AUC,
+                          mean_D6404.4_AUC,sd_D6404.4_AUC,n_bc_D6404.4_AUC,
+                          mean_D5733.4_AUC,sd_D5733.4_AUC,n_bc_D5733.4_AUC,
+                          mean_D6343.4_AUC,sd_D6343.4_AUC,n_bc_D6343.4_AUC,
+                          mean_D6271.4_AUC,sd_D6271.4_AUC,n_bc_D6271.4_AUC,
+                          mean_D5220.4_AUC,sd_D5220.4_AUC,n_bc_D5220.4_AUC,
+                          mean_D5417.4_AUC,sd_D5417.4_AUC,n_bc_D5417.4_AUC,
+                          mean_D5379.4_AUC,sd_D5379.4_AUC,n_bc_D5379.4_AUC)]
+
+aas <- c("A","C","D","E","F","G","H","I","K","L","M","N","P","Q","R","S","T","V","W","Y","-")
+#fill out missing values in table with a hideous loop, so the table is complete for all mutaitons (including those that are missing). If you are somebody who is reading this code, I apologize.
+for(lib in as.character(unique(dt_mutant$lib))){
+  for(bg in as.character(unique(dt_mutant$target))){
+    for(pos in 1:max(dt_mutant$position)){
+      for(aa in aas){
+        if(!(aa %in% as.character(dt_mutant[library==lib & target==bg & position==pos,mutant]))){
+          dt_mutant <- rbind(dt_mutant,list(lib, bg, dt_mutant[target==bg & position==pos,wildtype][1],pos,aa),fill=T)
+        }
+      }
+    }
+  }
+}
+setkey(dt_mutant,library,target,position,mutant)
+
+#fill in wildtype values -- should vectorize in data table but being so stupid so just going to write for loop
+for(lib in as.character(unique(dt_mutant$lib))){
+  for(bg in as.character(unique(dt_mutant$target))){
+    dt_mutant[library==lib & target==bg & wildtype==mutant, 
+              c("mean_D5338.3_AUC","sd_D5338.3_AUC","n_bc_D5338.3_AUC",
+                          "mean_D6391.3_AUC","sd_D6391.3_AUC","n_bc_D6391.3_AUC",
+                          "mean_D6404.3_AUC","sd_D6404.3_AUC","n_bc_D6404.3_AUC",
+                          "mean_D5733.3_AUC","sd_D5733.3_AUC","n_bc_D5733.3_AUC",
+                          "mean_D6343.3_AUC","sd_D6343.3_AUC","n_bc_D6343.3_AUC",
+                          "mean_D6271.3_AUC","sd_D6271.3_AUC","n_bc_D6271.3_AUC",
+                          "mean_D5220.3_AUC","sd_D5220.3_AUC","n_bc_D5220.3_AUC",
+                          "mean_D5417.3_AUC","sd_D5417.3_AUC","n_bc_D5417.3_AUC",
+                          "mean_D5379.3_AUC","sd_D5379.3_AUC","n_bc_D5379.3_AUC",
+                          "mean_D5338.4_AUC","sd_D5338.4_AUC","n_bc_D5338.4_AUC",
+                          "mean_D6391.4_AUC","sd_D6391.4_AUC","n_bc_D6391.4_AUC",
+                          "mean_D6404.4_AUC","sd_D6404.4_AUC","n_bc_D6404.4_AUC",
+                          "mean_D5733.4_AUC","sd_D5733.4_AUC","n_bc_D5733.4_AUC",
+                          "mean_D6343.4_AUC","sd_D6343.4_AUC","n_bc_D6343.4_AUC",
+                          "mean_D6271.4_AUC","sd_D6271.4_AUC","n_bc_D6271.4_AUC",
+                          "mean_D5220.4_AUC","sd_D5220.4_AUC","n_bc_D5220.4_AUC",
+                          "mean_D5417.4_AUC","sd_D5417.4_AUC","n_bc_D5417.4_AUC",
+                          "mean_D5379.4_AUC","sd_D5379.4_AUC","n_bc_D5379.4_AUC") := 
+                dt[library==lib & target==bg & variant_class=="wildtype",
+                   .(mean_D5338.3_AUC,sd_D5338.3_AUC,n_bc_D5338.3_AUC,
+                          mean_D6391.3_AUC,sd_D6391.3_AUC,n_bc_D6391.3_AUC,
+                          mean_D6404.3_AUC,sd_D6404.3_AUC,n_bc_D6404.3_AUC,
+                          mean_D5733.3_AUC,sd_D5733.3_AUC,n_bc_D5733.3_AUC,
+                          mean_D6343.3_AUC,sd_D6343.3_AUC,n_bc_D6343.3_AUC,
+                          mean_D6271.3_AUC,sd_D6271.3_AUC,n_bc_D6271.3_AUC,
+                          mean_D5220.3_AUC,sd_D5220.3_AUC,n_bc_D5220.3_AUC,
+                          mean_D5417.3_AUC,sd_D5417.3_AUC,n_bc_D5417.3_AUC,
+                          mean_D5379.3_AUC,sd_D5379.3_AUC,n_bc_D5379.3_AUC,
+                          mean_D5338.4_AUC,sd_D5338.4_AUC,n_bc_D5338.4_AUC,
+                          mean_D6391.4_AUC,sd_D6391.4_AUC,n_bc_D6391.4_AUC,
+                          mean_D6404.4_AUC,sd_D6404.4_AUC,n_bc_D6404.4_AUC,
+                          mean_D5733.4_AUC,sd_D5733.4_AUC,n_bc_D5733.4_AUC,
+                          mean_D6343.4_AUC,sd_D6343.4_AUC,n_bc_D6343.4_AUC,
+                          mean_D6271.4_AUC,sd_D6271.4_AUC,n_bc_D6271.4_AUC,
+                          mean_D5220.4_AUC,sd_D5220.4_AUC,n_bc_D5220.4_AUC,
+                          mean_D5417.4_AUC,sd_D5417.4_AUC,n_bc_D5417.4_AUC,
+                          mean_D5379.4_AUC,sd_D5379.4_AUC,n_bc_D5379.4_AUC)]]
+  }
+}
+
+#add delta bind measures relative to respective wildtypes
+for(lib in as.character(unique(dt_mutant$lib))){
+  for(bg in as.character(unique(dt_mutant$target))){
+    ref_D5338.3_AUC <- dt[library==lib & target==bg & variant_class=="wildtype",mean_D5338.3_AUC]
+    dt_mutant[library==lib & target==bg,delta_D5338.3_AUC := mean_D5338.3_AUC - ref_D5338.3_AUC]
+    ref_D6391.3_AUC <- dt[library==lib & target==bg & variant_class=="wildtype",mean_D6391.3_AUC]
+    dt_mutant[library==lib & target==bg,delta_D6391.3_AUC := mean_D6391.3_AUC - ref_D6391.3_AUC]
+    ref_D6404.3_AUC <- dt[library==lib & target==bg & variant_class=="wildtype",mean_D6404.3_AUC]
+    dt_mutant[library==lib & target==bg,delta_D6404.3_AUC := mean_D6404.3_AUC - ref_D6404.3_AUC]
+    ref_D5733.3_AUC <- dt[library==lib & target==bg & variant_class=="wildtype",mean_D5733.3_AUC]
+    dt_mutant[library==lib & target==bg,delta_D5733.3_AUC := mean_D5733.3_AUC - ref_D5733.3_AUC]
+    ref_D6343.3_AUC <- dt[library==lib & target==bg & variant_class=="wildtype",mean_D6343.3_AUC]
+    dt_mutant[library==lib & target==bg,delta_D6343.3_AUC := mean_D6343.3_AUC - ref_D6343.3_AUC]
+    ref_D6271.3_AUC <- dt[library==lib & target==bg & variant_class=="wildtype",mean_D6271.3_AUC]
+    dt_mutant[library==lib & target==bg,delta_D6271.3_AUC := mean_D6271.3_AUC - ref_D6271.3_AUC]
+    ref_D5220.3_AUC <- dt[library==lib & target==bg & variant_class=="wildtype",mean_D5220.3_AUC]
+    dt_mutant[library==lib & target==bg,delta_D5220.3_AUC := mean_D5220.3_AUC - ref_D5220.3_AUC]
+    ref_D5417.3_AUC <- dt[library==lib & target==bg & variant_class=="wildtype",mean_D5417.3_AUC]
+    dt_mutant[library==lib & target==bg,delta_D5417.3_AUC := mean_D5417.3_AUC - ref_D5417.3_AUC]
+    ref_D5379.3_AUC <- dt[library==lib & target==bg & variant_class=="wildtype",mean_D5379.3_AUC]
+    dt_mutant[library==lib & target==bg,delta_D5379.3_AUC := mean_D5379.3_AUC - ref_D5379.3_AUC]
+    
+    ref_D5338.4_AUC <- dt[library==lib & target==bg & variant_class=="wildtype",mean_D5338.4_AUC]
+    dt_mutant[library==lib & target==bg,delta_D5338.4_AUC := mean_D5338.4_AUC - ref_D5338.4_AUC]
+    ref_D6391.4_AUC <- dt[library==lib & target==bg & variant_class=="wildtype",mean_D6391.4_AUC]
+    dt_mutant[library==lib & target==bg,delta_D6391.4_AUC := mean_D6391.4_AUC - ref_D6391.4_AUC]
+    ref_D6404.4_AUC <- dt[library==lib & target==bg & variant_class=="wildtype",mean_D6404.4_AUC]
+    dt_mutant[library==lib & target==bg,delta_D6404.4_AUC := mean_D6404.4_AUC - ref_D6404.4_AUC]
+    ref_D5733.4_AUC <- dt[library==lib & target==bg & variant_class=="wildtype",mean_D5733.4_AUC]
+    dt_mutant[library==lib & target==bg,delta_D5733.4_AUC := mean_D5733.4_AUC - ref_D5733.4_AUC]
+    ref_D6343.4_AUC <- dt[library==lib & target==bg & variant_class=="wildtype",mean_D6343.4_AUC]
+    dt_mutant[library==lib & target==bg,delta_D6343.4_AUC := mean_D6343.4_AUC - ref_D6343.4_AUC]
+    ref_D6271.4_AUC <- dt[library==lib & target==bg & variant_class=="wildtype",mean_D6271.4_AUC]
+    dt_mutant[library==lib & target==bg,delta_D6271.4_AUC := mean_D6271.4_AUC - ref_D6271.4_AUC]
+    ref_D5220.4_AUC <- dt[library==lib & target==bg & variant_class=="wildtype",mean_D5220.4_AUC]
+    dt_mutant[library==lib & target==bg,delta_D5220.4_AUC := mean_D5220.4_AUC - ref_D5220.4_AUC]
+    ref_D5417.4_AUC <- dt[library==lib & target==bg & variant_class=="wildtype",mean_D5417.4_AUC]
+    dt_mutant[library==lib & target==bg,delta_D5417.4_AUC := mean_D5417.4_AUC - ref_D5417.4_AUC]
+    ref_D5379.4_AUC <- dt[library==lib & target==bg & variant_class=="wildtype",mean_D5379.4_AUC]
+    dt_mutant[library==lib & target==bg,delta_D5379.4_AUC := mean_D5379.4_AUC - ref_D5379.4_AUC]
+  }
+}
+
+#reindex sites for each background according to alignment. I will keep two columns: one gives each mutation in the "SARS2" spike indexing, one that gives that spike's indexing
+
+#remove positions past the last index (no wildtype position). Could also fix this above when we fill out this table
+dt_mutant <- dt_mutant[!is.na(wildtype)]
+
+#set empty columns to fill with indexed sites
+dt_mutant$site <- as.character(NA)
+dt_mutant$site_SARS2 <- as.character(NA)
+
+#do by bg with if/else looping
+for(i in 1:nrow(dt_mutant)){
+  if(dt_mutant[i,target]=="SARS-CoV-2_WH1"){
+    dt_mutant[i,site := as.character(RBD_sites[RBD_sites$site_SARS2_RBD==dt_mutant[i,position] & !is.na(RBD_sites$site_SARS2_RBD),"site_SARS2_spike"])]
+    dt_mutant[i,site_SARS2 := as.character(RBD_sites[RBD_sites$site_SARS2_RBD==dt_mutant[i,position] & !is.na(RBD_sites$site_SARS2_RBD),"site_SARS2_spike"])]
+  }else if(dt_mutant[i,target]=="PRD-0038"){
+    dt_mutant[i,site:=as.character(RBD_sites[RBD_sites$site_PRD0038_RBD==dt_mutant[i,position] & !is.na(RBD_sites$site_PRD0038_RBD),"site_PRD0038_spike"])]
+    dt_mutant[i,site_SARS2 := as.character(RBD_sites[RBD_sites$site_PRD0038_RBD==dt_mutant[i,position] & !is.na(RBD_sites$site_PRD0038_RBD),"site_SARS2_spike"])]
+  }else if(dt_mutant[i,target]=="SARS-CoV-1_Urbani"){
+    dt_mutant[i,site := as.character(RBD_sites[RBD_sites$site_SARS1_RBD==dt_mutant[i,position] & !is.na(RBD_sites$site_SARS1_RBD),"site_SARS1_spike"])]
+    dt_mutant[i,site_SARS2 := as.character(RBD_sites[RBD_sites$site_SARS1_RBD==dt_mutant[i,position] & !is.na(RBD_sites$site_SARS1_RBD),"site_SARS2_spike"])]
+  }else if(dt_mutant[i,target]=="SARS-CoV-2_XBB15"){
+    dt_mutant[i,site := as.character(RBD_sites[RBD_sites$site_SARS2_RBD==dt_mutant[i,position] & !is.na(RBD_sites$site_SARS2_RBD),"site_SARS2_spike"])]
+    dt_mutant[i,site_SARS2 := as.character(RBD_sites[RBD_sites$site_SARS2_RBD==dt_mutant[i,position] & !is.na(RBD_sites$site_SARS2_RBD),"site_SARS2_spike"])]
+  }
+}
+
+#add single mutation string indicators
+dt_mutant[,mutation:=paste(wildtype,site,mutant,sep=""),by=c("wildtype","site","mutant")]
+dt_mutant[,mutation_SARS2:=paste(wildtype,site_SARS2,mutant,sep=""),by=c("wildtype","site_SARS2","mutant")]
+
+dt_mutant <- unique(dt_mutant[,.(target,wildtype,site,site_SARS2,mutant,mutation,mutation_SARS2,
+                               mean_D5338.3_AUC,sd_D5338.3_AUC,delta_D5338.3_AUC,n_bc_D5338.3_AUC,
+                               mean_D6391.3_AUC,sd_D6391.3_AUC,delta_D6391.3_AUC,n_bc_D6391.3_AUC,
+                               mean_D6404.3_AUC,sd_D6404.3_AUC,delta_D6404.3_AUC,n_bc_D6404.3_AUC,
+                               mean_D5733.3_AUC,sd_D5733.3_AUC,delta_D5733.3_AUC,n_bc_D5733.3_AUC,
+                               mean_D6343.3_AUC,sd_D6343.3_AUC,delta_D6343.3_AUC,n_bc_D6343.3_AUC,
+                               mean_D6271.3_AUC,sd_D6271.3_AUC,delta_D6271.3_AUC,n_bc_D6271.3_AUC,
+                               mean_D5220.3_AUC,sd_D5220.3_AUC,delta_D5220.3_AUC,n_bc_D5220.3_AUC,
+                               mean_D5417.3_AUC,sd_D5417.3_AUC,delta_D5417.3_AUC,n_bc_D5417.3_AUC,
+                               mean_D5379.3_AUC,sd_D5379.3_AUC,delta_D5379.3_AUC,n_bc_D5379.3_AUC,
+                               mean_D5338.4_AUC,sd_D5338.4_AUC,delta_D5338.4_AUC,n_bc_D5338.4_AUC,
+                               mean_D6391.4_AUC,sd_D6391.4_AUC,delta_D6391.4_AUC,n_bc_D6391.4_AUC,
+                               mean_D6404.4_AUC,sd_D6404.4_AUC,delta_D6404.4_AUC,n_bc_D6404.4_AUC,
+                               mean_D5733.4_AUC,sd_D5733.4_AUC,delta_D5733.4_AUC,n_bc_D5733.4_AUC,
+                               mean_D6343.4_AUC,sd_D6343.4_AUC,delta_D6343.4_AUC,n_bc_D6343.4_AUC,
+                               mean_D6271.4_AUC,sd_D6271.4_AUC,delta_D6271.4_AUC,n_bc_D6271.4_AUC,
+                               mean_D5220.4_AUC,sd_D5220.4_AUC,delta_D5220.4_AUC,n_bc_D5220.4_AUC,
+                               mean_D5417.4_AUC,sd_D5417.4_AUC,delta_D5417.4_AUC,n_bc_D5417.4_AUC,
+                               mean_D5379.4_AUC,sd_D5379.4_AUC,delta_D5379.4_AUC,n_bc_D5379.4_AUC)])
+
+#rename some of the columns
+setnames(dt_mutant,"mean_D5338.3_AUC","D5338.3_AUC")
+setnames(dt_mutant,"mean_D6391.3_AUC","D6391.3_AUC")
+setnames(dt_mutant,"mean_D6404.3_AUC","D6404.3_AUC")
+setnames(dt_mutant,"mean_D5733.3_AUC","D5733.3_AUC")
+setnames(dt_mutant,"mean_D6343.3_AUC","D6343.3_AUC")
+setnames(dt_mutant,"mean_D6271.3_AUC","D6271.3_AUC")
+setnames(dt_mutant,"mean_D5220.3_AUC","D5220.3_AUC")
+setnames(dt_mutant,"mean_D5417.3_AUC","D5417.3_AUC")
+setnames(dt_mutant,"mean_D5379.3_AUC","D5379.3_AUC")
+
+setnames(dt_mutant,"mean_D5338.4_AUC","D5338.4_AUC")
+setnames(dt_mutant,"mean_D6391.4_AUC","D6391.4_AUC")
+setnames(dt_mutant,"mean_D6404.4_AUC","D6404.4_AUC")
+setnames(dt_mutant,"mean_D5733.4_AUC","D5733.4_AUC")
+setnames(dt_mutant,"mean_D6343.4_AUC","D6343.4_AUC")
+setnames(dt_mutant,"mean_D6271.4_AUC","D6271.4_AUC")
+setnames(dt_mutant,"mean_D5220.4_AUC","D5220.4_AUC")
+setnames(dt_mutant,"mean_D5417.4_AUC","D5417.4_AUC")
+setnames(dt_mutant,"mean_D5379.4_AUC","D5379.4_AUC")
+```
+
+Censor any measurements that are from a single bc and/or below a certain
+SEM? don’t do this for now, let’s visualize first, do this when
+collapsing summary metric per site.
+
+``` r
+# min_bc <- 2
+# min_lib <- 2
+#  
+# dt_mutant[n_bc_bind < min_bc, c("bind","delta_bind","n_bc_bind","n_libs_bind") := list(NA,NA,NA,NA)]
+# dt_mutant[n_bc_expr < min_bc, c("expr","delta_expr","n_bc_expr","n_libs_expr") := list(NA,NA,NA,NA)]
+```
+
+Coverage stats on n_barcodes for different measurements in the final
+pooled measurements.
+
+``` r
+par(mfrow=c(3,3))
+hist(dt_mutant[wildtype!=mutant & mutant!="-", n_bc_D5338.3_AUC],col="gray50",main=paste("mutant D5338.3_AUC score,\nmedian ",median(dt_mutant[wildtype!=mutant & mutant!="-", n_bc_D5338.3_AUC],na.rm=T),sep=""),right=F,breaks=max(dt_mutant[wildtype!=mutant & mutant!="-", n_bc_D5338.3_AUC],na.rm=T),xlab="")
+
+hist(dt_mutant[wildtype!=mutant & mutant!="-", n_bc_D6391.3_AUC],col="gray50",main=paste("mutant D6391.3_AUC score,\nmedian ",median(dt_mutant[wildtype!=mutant & mutant!="-", n_bc_D6391.3_AUC],na.rm=T),sep=""),right=F,breaks=max(dt_mutant[wildtype!=mutant & mutant!="-", n_bc_D6391.3_AUC],na.rm=T),xlab="")
+
+hist(dt_mutant[wildtype!=mutant & mutant!="-", n_bc_D6404.3_AUC],col="gray50",main=paste("mutant D6404.3_AUC score,\nmedian ",median(dt_mutant[wildtype!=mutant & mutant!="-", n_bc_D6404.3_AUC],na.rm=T),sep=""),right=F,breaks=max(dt_mutant[wildtype!=mutant & mutant!="-", n_bc_D6404.3_AUC],na.rm=T),xlab="")
+
+hist(dt_mutant[wildtype!=mutant & mutant!="-", n_bc_D5733.3_AUC],col="gray50",main=paste("mutant D5733.3_AUC score,\nmedian ",median(dt_mutant[wildtype!=mutant & mutant!="-", n_bc_D5733.3_AUC],na.rm=T),sep=""),right=F,breaks=max(dt_mutant[wildtype!=mutant & mutant!="-", n_bc_D5733.3_AUC],na.rm=T),xlab="")
+
+hist(dt_mutant[wildtype!=mutant & mutant!="-", n_bc_D6343.3_AUC],col="gray50",main=paste("mutant D6343.3_AUC score,\nmedian ",median(dt_mutant[wildtype!=mutant & mutant!="-", n_bc_D6343.3_AUC],na.rm=T),sep=""),right=F,breaks=max(dt_mutant[wildtype!=mutant & mutant!="-", n_bc_D6343.3_AUC],na.rm=T),xlab="")
+
+hist(dt_mutant[wildtype!=mutant & mutant!="-", n_bc_D6271.3_AUC],col="gray50",main=paste("mutant D6271.3_AUC score,\nmedian ",median(dt_mutant[wildtype!=mutant & mutant!="-", n_bc_D6271.3_AUC],na.rm=T),sep=""),right=F,breaks=max(dt_mutant[wildtype!=mutant & mutant!="-", n_bc_D6271.3_AUC],na.rm=T),xlab="")
+
+hist(dt_mutant[wildtype!=mutant & mutant!="-", n_bc_D5220.3_AUC],col="gray50",main=paste("mutant D5220.3_AUC score,\nmedian ",median(dt_mutant[wildtype!=mutant & mutant!="-", n_bc_D5220.3_AUC],na.rm=T),sep=""),right=F,breaks=max(dt_mutant[wildtype!=mutant & mutant!="-", n_bc_D5220.3_AUC],na.rm=T),xlab="")
+
+hist(dt_mutant[wildtype!=mutant & mutant!="-", n_bc_D5417.3_AUC],col="gray50",main=paste("mutant D5417.3_AUC score,\nmedian ",median(dt_mutant[wildtype!=mutant & mutant!="-", n_bc_D5417.3_AUC],na.rm=T),sep=""),right=F,breaks=max(dt_mutant[wildtype!=mutant & mutant!="-", n_bc_D5417.3_AUC],na.rm=T),xlab="")
+
+hist(dt_mutant[wildtype!=mutant & mutant!="-", n_bc_D5379.3_AUC],col="gray50",main=paste("mutant D5379.3_AUC score,\nmedian ",median(dt_mutant[wildtype!=mutant & mutant!="-", n_bc_D5379.3_AUC],na.rm=T),sep=""),right=F,breaks=max(dt_mutant[wildtype!=mutant & mutant!="-", n_bc_D5379.3_AUC],na.rm=T),xlab="")
+```
+
+<img src="collapse_barcodes_SARSr-DMS_files/figure-gfm/n_barcode_plots.3-1.png" style="display: block; margin: auto;" />
+
+``` r
+invisible(dev.print(pdf, paste(config$final_variant_scores_dir,"/lib40_histogram_n_bc_per_geno_pooled-libs.3.pdf",sep="")))
+```
+
+``` r
+par(mfrow=c(3,3))
+hist(dt_mutant[wildtype!=mutant & mutant!="-", n_bc_D5338.4_AUC],col="gray50",main=paste("mutant D5338.4_AUC score,\nmedian ",median(dt_mutant[wildtype!=mutant & mutant!="-", n_bc_D5338.4_AUC],na.rm=T),sep=""),right=F,breaks=max(dt_mutant[wildtype!=mutant & mutant!="-", n_bc_D5338.4_AUC],na.rm=T),xlab="")
+
+hist(dt_mutant[wildtype!=mutant & mutant!="-", n_bc_D6391.4_AUC],col="gray50",main=paste("mutant D6391.4_AUC score,\nmedian ",median(dt_mutant[wildtype!=mutant & mutant!="-", n_bc_D6391.4_AUC],na.rm=T),sep=""),right=F,breaks=max(dt_mutant[wildtype!=mutant & mutant!="-", n_bc_D6391.4_AUC],na.rm=T),xlab="")
+
+hist(dt_mutant[wildtype!=mutant & mutant!="-", n_bc_D6404.4_AUC],col="gray50",main=paste("mutant D6404.4_AUC score,\nmedian ",median(dt_mutant[wildtype!=mutant & mutant!="-", n_bc_D6404.4_AUC],na.rm=T),sep=""),right=F,breaks=max(dt_mutant[wildtype!=mutant & mutant!="-", n_bc_D6404.4_AUC],na.rm=T),xlab="")
+
+hist(dt_mutant[wildtype!=mutant & mutant!="-", n_bc_D5733.4_AUC],col="gray50",main=paste("mutant D5733.4_AUC score,\nmedian ",median(dt_mutant[wildtype!=mutant & mutant!="-", n_bc_D5733.4_AUC],na.rm=T),sep=""),right=F,breaks=max(dt_mutant[wildtype!=mutant & mutant!="-", n_bc_D5733.4_AUC],na.rm=T),xlab="")
+
+hist(dt_mutant[wildtype!=mutant & mutant!="-", n_bc_D6343.4_AUC],col="gray50",main=paste("mutant D6343.4_AUC score,\nmedian ",median(dt_mutant[wildtype!=mutant & mutant!="-", n_bc_D6343.4_AUC],na.rm=T),sep=""),right=F,breaks=max(dt_mutant[wildtype!=mutant & mutant!="-", n_bc_D6343.4_AUC],na.rm=T),xlab="")
+
+hist(dt_mutant[wildtype!=mutant & mutant!="-", n_bc_D6271.4_AUC],col="gray50",main=paste("mutant D6271.4_AUC score,\nmedian ",median(dt_mutant[wildtype!=mutant & mutant!="-", n_bc_D6271.4_AUC],na.rm=T),sep=""),right=F,breaks=max(dt_mutant[wildtype!=mutant & mutant!="-", n_bc_D6271.4_AUC],na.rm=T),xlab="")
+
+hist(dt_mutant[wildtype!=mutant & mutant!="-", n_bc_D5220.4_AUC],col="gray50",main=paste("mutant D5220.4_AUC score,\nmedian ",median(dt_mutant[wildtype!=mutant & mutant!="-", n_bc_D5220.4_AUC],na.rm=T),sep=""),right=F,breaks=max(dt_mutant[wildtype!=mutant & mutant!="-", n_bc_D5220.4_AUC],na.rm=T),xlab="")
+
+hist(dt_mutant[wildtype!=mutant & mutant!="-", n_bc_D5417.4_AUC],col="gray50",main=paste("mutant D5417.4_AUC score,\nmedian ",median(dt_mutant[wildtype!=mutant & mutant!="-", n_bc_D5417.4_AUC],na.rm=T),sep=""),right=F,breaks=max(dt_mutant[wildtype!=mutant & mutant!="-", n_bc_D5417.4_AUC],na.rm=T),xlab="")
+
+hist(dt_mutant[wildtype!=mutant & mutant!="-", n_bc_D5379.4_AUC],col="gray50",main=paste("mutant D5379.4_AUC score,\nmedian ",median(dt_mutant[wildtype!=mutant & mutant!="-", n_bc_D5379.4_AUC],na.rm=T),sep=""),right=F,breaks=max(dt_mutant[wildtype!=mutant & mutant!="-", n_bc_D5379.4_AUC],na.rm=T),xlab="")
+```
+
+<img src="collapse_barcodes_SARSr-DMS_files/figure-gfm/n_barcode_plots.4-1.png" style="display: block; margin: auto;" />
+
+``` r
+invisible(dev.print(pdf, paste(config$final_variant_scores_dir,"/lib40_histogram_n_bc_per_geno_pooled-libs.4.pdf",sep="")))
+```
+
+## Expression effects
+
+Integrate the previously measured impacts of mutations on expression,
+look at applying a correction or a cutoff based on expression?
+
+``` r
+dt_mutant[,c("expr","delta_expr"):=as.numeric(NA)]
+for(i in 1:nrow(dt_mutant)){
+  bg <- as.character(dt_mutant[i,target]) #have to define these b/c data.table sometimes is weird with in situ referneces when colnames are shared...
+  pos <- as.character(dt_mutant[i,site])
+  aa <- as.character(dt_mutant[i,mutant])
+  if(aa!="-" | bg=="SARS-CoV-2_XBB15"){
+    dt_mutant[i, c("expr","delta_expr") := dt_expr[as.character(target)==bg & as.character(site)==pos & as.character(mutant)==aa,.(expr,delta_expr)]] 
+  }else{
+    dt_mutant[i, c("expr","delta_expr") := list(as.numeric(NA),as.numeric(NA))] 
+  }
+}
+```
+
+Serum binding values really drop off below delta_expr values of \~-1.
+But even zoomed in on the \~-1, we can see there is a correlation. I
+wonder if we could do something like a spline or linear model and apply
+correction?
+
+``` r
+par(mfrow=c(9,2))
+plot(dt_mutant[wildtype!=mutant,delta_expr],dt_mutant[wildtype!=mutant,delta_D5338.3_AUC],pch=16,col="#00000040",xlab="mutant expression",ylab="mutant sera AUC [D5338.3]");abline(v=-1,lty=2,col="red",main="D5338.3")
+
+plot(dt_mutant[wildtype!=mutant & delta_expr > -1,delta_expr],dt_mutant[wildtype!=mutant & delta_expr > -1,delta_D5338.3_AUC],pch=16,col="#00000040",xlab="mutant expression",ylab="mutant sera AUC [D5338.3]"); abline(lm(dt_mutant[wildtype!=mutant & delta_expr > -1,delta_D5338.3_AUC] ~ dt_mutant[wildtype!=mutant & delta_expr > -1,delta_expr]),lty=2,col="red")
+
+plot(dt_mutant[wildtype!=mutant,delta_expr],dt_mutant[wildtype!=mutant,delta_D6391.3_AUC],pch=16,col="#00000040",xlab="mutant expression",ylab="mutant sera AUC [D6391.3]");abline(v=-1,lty=2,col="red",main="D6391.3")
+
+plot(dt_mutant[wildtype!=mutant & delta_expr > -1,delta_expr],dt_mutant[wildtype!=mutant & delta_expr > -1,delta_D6391.3_AUC],pch=16,col="#00000040",xlab="mutant expression",ylab="mutant sera AUC [D6391.3]"); abline(lm(dt_mutant[wildtype!=mutant & delta_expr > -1,delta_D6391.3_AUC] ~ dt_mutant[wildtype!=mutant & delta_expr > -1,delta_expr]),lty=2,col="red")
+
+plot(dt_mutant[wildtype!=mutant,delta_expr],dt_mutant[wildtype!=mutant,delta_D6404.3_AUC],pch=16,col="#00000040",xlab="mutant expression",ylab="mutant sera AUC [D6404.3]");abline(v=-1,lty=2,col="red",main="D6404.3")
+
+plot(dt_mutant[wildtype!=mutant & delta_expr > -1,delta_expr],dt_mutant[wildtype!=mutant & delta_expr > -1,delta_D6404.3_AUC],pch=16,col="#00000040",xlab="mutant expression",ylab="mutant sera AUC [D6404.3]");  abline(lm(dt_mutant[wildtype!=mutant & delta_expr > -1,delta_D6404.3_AUC] ~ dt_mutant[wildtype!=mutant & delta_expr > -1,delta_expr]),lty=2,col="red")
+
+plot(dt_mutant[wildtype!=mutant,delta_expr],dt_mutant[wildtype!=mutant,delta_D5733.3_AUC],pch=16,col="#00000040",xlab="mutant expression",ylab="mutant sera AUC [D5733.3]");abline(v=-1,lty=2,col="red",main="D5733.3")
+
+plot(dt_mutant[wildtype!=mutant & delta_expr > -1,delta_expr],dt_mutant[wildtype!=mutant & delta_expr > -1,delta_D5733.3_AUC],pch=16,col="#00000040",xlab="mutant expression",ylab="mutant sera AUC [D5733.3]");  abline(lm(dt_mutant[wildtype!=mutant & delta_expr > -1,delta_D5733.3_AUC] ~ dt_mutant[wildtype!=mutant & delta_expr > -1,delta_expr]),lty=2,col="red")
+
+plot(dt_mutant[wildtype!=mutant,delta_expr],dt_mutant[wildtype!=mutant,delta_D6343.3_AUC],pch=16,col="#00000040",xlab="mutant expression",ylab="mutant sera AUC [D6343.3]");abline(v=-1,lty=2,col="red",main="D6343.3")
+
+plot(dt_mutant[wildtype!=mutant & delta_expr > -1,delta_expr],dt_mutant[wildtype!=mutant & delta_expr > -1,delta_D6343.3_AUC],pch=16,col="#00000040",xlab="mutant expression",ylab="mutant sera AUC [D6343.3]"); abline(lm(dt_mutant[wildtype!=mutant & delta_expr > -1,delta_D6343.3_AUC] ~ dt_mutant[wildtype!=mutant & delta_expr > -1,delta_expr]),lty=2,col="red")
+
+plot(dt_mutant[wildtype!=mutant,delta_expr],dt_mutant[wildtype!=mutant,delta_D6271.3_AUC],pch=16,col="#00000040",xlab="mutant expression",ylab="mutant sera AUC [D6271.3]");abline(v=-1,lty=2,col="red",main="D6271.3")
+
+plot(dt_mutant[wildtype!=mutant & delta_expr > -1,delta_expr],dt_mutant[wildtype!=mutant & delta_expr > -1,delta_D6271.3_AUC],pch=16,col="#00000040",xlab="mutant expression",ylab="mutant sera AUC [D6271.3]");  abline(lm(dt_mutant[wildtype!=mutant & delta_expr > -1,delta_D6271.3_AUC] ~ dt_mutant[wildtype!=mutant & delta_expr > -1,delta_expr]),lty=2,col="red")
+
+plot(dt_mutant[wildtype!=mutant,delta_expr],dt_mutant[wildtype!=mutant,delta_D5220.3_AUC],pch=16,col="#00000040",xlab="mutant expression",ylab="mutant sera AUC [D5220.3]");abline(v=-1,lty=2,col="red",main="D5220.3")
+
+plot(dt_mutant[wildtype!=mutant & delta_expr > -1,delta_expr],dt_mutant[wildtype!=mutant & delta_expr > -1,delta_D5220.3_AUC],pch=16,col="#00000040",xlab="mutant expression",ylab="mutant sera AUC [D5220.3]"); abline(lm(dt_mutant[wildtype!=mutant & delta_expr > -1,delta_D5220.3_AUC] ~ dt_mutant[wildtype!=mutant & delta_expr > -1,delta_expr]),lty=2,col="red")
+
+
+plot(dt_mutant[wildtype!=mutant,delta_expr],dt_mutant[wildtype!=mutant,delta_D5417.3_AUC],pch=16,col="#00000040",xlab="mutant expression",ylab="mutant sera AUC [D5417.3]");abline(v=-1,lty=2,col="red",main="D5417.3")
+
+plot(dt_mutant[wildtype!=mutant & delta_expr > -1,delta_expr],dt_mutant[wildtype!=mutant & delta_expr > -1,delta_D5417.3_AUC],pch=16,col="#00000040",xlab="mutant expression",ylab="mutant sera AUC [D5417.3]"); abline(lm(dt_mutant[wildtype!=mutant & delta_expr > -1,delta_D5417.3_AUC] ~ dt_mutant[wildtype!=mutant & delta_expr > -1,delta_expr]),lty=2,col="red")
+
+
+plot(dt_mutant[wildtype!=mutant,delta_expr],dt_mutant[wildtype!=mutant,delta_D5379.3_AUC],pch=16,col="#00000040",xlab="mutant expression",ylab="mutant sera AUC [D5379.3]");abline(v=-1,lty=2,col="red",main="D5379.3")
+
+plot(dt_mutant[wildtype!=mutant & delta_expr > -1,delta_expr],dt_mutant[wildtype!=mutant & delta_expr > -1,delta_D5379.3_AUC],pch=16,col="#00000040",xlab="mutant expression",ylab="mutant sera AUC [D5379.3]"); abline(lm(dt_mutant[wildtype!=mutant & delta_expr > -1,delta_D5379.3_AUC] ~ dt_mutant[wildtype!=mutant & delta_expr > -1,delta_expr]),lty=2,col="red")
+```
+
+<img src="collapse_barcodes_SARSr-DMS_files/figure-gfm/plot_expression.3-1.png" style="display: block; margin: auto;" />
+
+``` r
+par(mfrow=c(9,2))
+plot(dt_mutant[wildtype!=mutant,delta_expr],dt_mutant[wildtype!=mutant,delta_D5338.4_AUC],pch=16,col="#00000040",xlab="mutant expression",ylab="mutant sera AUC [D5338.4]");abline(v=-1,lty=2,col="red",main="D5338.4")
+
+plot(dt_mutant[wildtype!=mutant & delta_expr > -1,delta_expr],dt_mutant[wildtype!=mutant & delta_expr > -1,delta_D5338.4_AUC],pch=16,col="#00000040",xlab="mutant expression",ylab="mutant sera AUC [D5338.4]"); abline(lm(dt_mutant[wildtype!=mutant & delta_expr > -1,delta_D5338.4_AUC] ~ dt_mutant[wildtype!=mutant & delta_expr > -1,delta_expr]),lty=2,col="red")
+
+plot(dt_mutant[wildtype!=mutant,delta_expr],dt_mutant[wildtype!=mutant,delta_D6391.4_AUC],pch=16,col="#00000040",xlab="mutant expression",ylab="mutant sera AUC [D6391.4]");abline(v=-1,lty=2,col="red",main="D6391.4")
+
+plot(dt_mutant[wildtype!=mutant & delta_expr > -1,delta_expr],dt_mutant[wildtype!=mutant & delta_expr > -1,delta_D6391.4_AUC],pch=16,col="#00000040",xlab="mutant expression",ylab="mutant sera AUC [D6391.4]"); abline(lm(dt_mutant[wildtype!=mutant & delta_expr > -1,delta_D6391.4_AUC] ~ dt_mutant[wildtype!=mutant & delta_expr > -1,delta_expr]),lty=2,col="red")
+
+plot(dt_mutant[wildtype!=mutant,delta_expr],dt_mutant[wildtype!=mutant,delta_D6404.4_AUC],pch=16,col="#00000040",xlab="mutant expression",ylab="mutant sera AUC [D6404.4]");abline(v=-1,lty=2,col="red",main="D6404.4")
+
+plot(dt_mutant[wildtype!=mutant & delta_expr > -1,delta_expr],dt_mutant[wildtype!=mutant & delta_expr > -1,delta_D6404.4_AUC],pch=16,col="#00000040",xlab="mutant expression",ylab="mutant sera AUC [D6404.4]");  abline(lm(dt_mutant[wildtype!=mutant & delta_expr > -1,delta_D6404.4_AUC] ~ dt_mutant[wildtype!=mutant & delta_expr > -1,delta_expr]),lty=2,col="red")
+
+plot(dt_mutant[wildtype!=mutant,delta_expr],dt_mutant[wildtype!=mutant,delta_D5733.4_AUC],pch=16,col="#00000040",xlab="mutant expression",ylab="mutant sera AUC [D5733.4]");abline(v=-1,lty=2,col="red",main="D5733.4")
+
+plot(dt_mutant[wildtype!=mutant & delta_expr > -1,delta_expr],dt_mutant[wildtype!=mutant & delta_expr > -1,delta_D5733.4_AUC],pch=16,col="#00000040",xlab="mutant expression",ylab="mutant sera AUC [D5733.4]");  abline(lm(dt_mutant[wildtype!=mutant & delta_expr > -1,delta_D5733.4_AUC] ~ dt_mutant[wildtype!=mutant & delta_expr > -1,delta_expr]),lty=2,col="red")
+
+plot(dt_mutant[wildtype!=mutant,delta_expr],dt_mutant[wildtype!=mutant,delta_D6343.4_AUC],pch=16,col="#00000040",xlab="mutant expression",ylab="mutant sera AUC [D6343.4]");abline(v=-1,lty=2,col="red",main="D6343.4")
+
+plot(dt_mutant[wildtype!=mutant & delta_expr > -1,delta_expr],dt_mutant[wildtype!=mutant & delta_expr > -1,delta_D6343.4_AUC],pch=16,col="#00000040",xlab="mutant expression",ylab="mutant sera AUC [D6343.4]"); abline(lm(dt_mutant[wildtype!=mutant & delta_expr > -1,delta_D6343.4_AUC] ~ dt_mutant[wildtype!=mutant & delta_expr > -1,delta_expr]),lty=2,col="red")
+
+plot(dt_mutant[wildtype!=mutant,delta_expr],dt_mutant[wildtype!=mutant,delta_D6271.4_AUC],pch=16,col="#00000040",xlab="mutant expression",ylab="mutant sera AUC [D6271.4]");abline(v=-1,lty=2,col="red",main="D6271.4")
+
+plot(dt_mutant[wildtype!=mutant & delta_expr > -1,delta_expr],dt_mutant[wildtype!=mutant & delta_expr > -1,delta_D6271.4_AUC],pch=16,col="#00000040",xlab="mutant expression",ylab="mutant sera AUC [D6271.4]");  abline(lm(dt_mutant[wildtype!=mutant & delta_expr > -1,delta_D6271.4_AUC] ~ dt_mutant[wildtype!=mutant & delta_expr > -1,delta_expr]),lty=2,col="red")
+
+plot(dt_mutant[wildtype!=mutant,delta_expr],dt_mutant[wildtype!=mutant,delta_D5220.4_AUC],pch=16,col="#00000040",xlab="mutant expression",ylab="mutant sera AUC [D5220.4]");abline(v=-1,lty=2,col="red",main="D5220.4")
+
+plot(dt_mutant[wildtype!=mutant & delta_expr > -1,delta_expr],dt_mutant[wildtype!=mutant & delta_expr > -1,delta_D5220.4_AUC],pch=16,col="#00000040",xlab="mutant expression",ylab="mutant sera AUC [D5220.4]"); abline(lm(dt_mutant[wildtype!=mutant & delta_expr > -1,delta_D5220.4_AUC] ~ dt_mutant[wildtype!=mutant & delta_expr > -1,delta_expr]),lty=2,col="red")
+
+
+plot(dt_mutant[wildtype!=mutant,delta_expr],dt_mutant[wildtype!=mutant,delta_D5417.4_AUC],pch=16,col="#00000040",xlab="mutant expression",ylab="mutant sera AUC [D5417.4]");abline(v=-1,lty=2,col="red",main="D5417.4")
+
+plot(dt_mutant[wildtype!=mutant & delta_expr > -1,delta_expr],dt_mutant[wildtype!=mutant & delta_expr > -1,delta_D5417.4_AUC],pch=16,col="#00000040",xlab="mutant expression",ylab="mutant sera AUC [D5417.4]"); abline(lm(dt_mutant[wildtype!=mutant & delta_expr > -1,delta_D5417.4_AUC] ~ dt_mutant[wildtype!=mutant & delta_expr > -1,delta_expr]),lty=2,col="red")
+
+
+plot(dt_mutant[wildtype!=mutant,delta_expr],dt_mutant[wildtype!=mutant,delta_D5379.4_AUC],pch=16,col="#00000040",xlab="mutant expression",ylab="mutant sera AUC [D5379.4]");abline(v=-1,lty=2,col="red",main="D5379.4")
+
+plot(dt_mutant[wildtype!=mutant & delta_expr > -1,delta_expr],dt_mutant[wildtype!=mutant & delta_expr > -1,delta_D5379.4_AUC],pch=16,col="#00000040",xlab="mutant expression",ylab="mutant sera AUC [D5379.4]"); abline(lm(dt_mutant[wildtype!=mutant & delta_expr > -1,delta_D5379.4_AUC] ~ dt_mutant[wildtype!=mutant & delta_expr > -1,delta_expr]),lty=2,col="red")
+```
+
+<img src="collapse_barcodes_SARSr-DMS_files/figure-gfm/plot_expression.4-1.png" style="display: block; margin: auto;" />
+
+Derive a normalized AUC metric that (i) filters out variants with
+delta_expr \<-1 up to 0 and (ii) normalizes by the linear trend between
+delta-AUC and delta-expr in this window (normalize by linear line from
+-0.5 and up to avoid creep-in of some unfolded muts). Let’s leave like
+this, but makign note I might want to push stringent filter to remove
+things with delta_expr \< -0.75 instead of -1
+
+``` r
+dt_mutant[,c("delta_D5338.3_normAUC","delta_D6391.3_normAUC","delta_D6404.3_normAUC",
+             "delta_D5733.3_normAUC","delta_D6343.3_normAUC","delta_D6271.3_normAUC",
+             "delta_D5220.3_normAUC","delta_D5417.3_normAUC","delta_D5379.3_normAUC",
+             "delta_D5338.4_normAUC","delta_D6391.4_normAUC","delta_D6404.4_normAUC",
+             "delta_D5733.4_normAUC","delta_D6343.4_normAUC","delta_D6271.4_normAUC",
+             "delta_D5220.4_normAUC","delta_D5417.4_normAUC","delta_D5379.4_normAUC"):=as.numeric(NA)]
+
+lm_D5338.3 <- lm(dt_mutant[wildtype != mutant & delta_expr > -0.5,delta_D5338.3_AUC] ~ dt_mutant[wildtype != mutant & delta_expr > -0.5,delta_expr]) #0.48648
+dt_mutant[delta_expr > -1, delta_D5338.3_normAUC := delta_D5338.3_AUC - (lm_D5338.3$coefficients[2] * delta_expr)]
+
+lm_D6391.3 <- lm(dt_mutant[wildtype != mutant & delta_expr > -0.5,delta_D6391.3_AUC] ~ dt_mutant[wildtype != mutant & delta_expr > -0.5,delta_expr]) #0.45686
+dt_mutant[delta_expr > -1, delta_D6391.3_normAUC := delta_D6391.3_AUC - (lm_D6391.3$coefficients[2] * delta_expr)]
+
+lm_D6404.3 <- lm(dt_mutant[wildtype != mutant & delta_expr > -0.5,delta_D6404.3_AUC] ~ dt_mutant[wildtype != mutant & delta_expr > -0.5,delta_expr]) #0.53314
+dt_mutant[delta_expr > -1, delta_D6404.3_normAUC := delta_D6404.3_AUC - (lm_D6404.3$coefficients[2] * delta_expr)]
+
+lm_D5733.3 <- lm(dt_mutant[wildtype != mutant & delta_expr > -0.5,delta_D5733.3_AUC] ~ dt_mutant[wildtype != mutant & delta_expr > -0.5,delta_expr]) #0.6619
+dt_mutant[delta_expr > -1, delta_D5733.3_normAUC := delta_D5733.3_AUC - (lm_D5733.3$coefficients[2] * delta_expr)]
+
+lm_D6343.3 <- lm(dt_mutant[wildtype != mutant & delta_expr > -0.5,delta_D6343.3_AUC] ~ dt_mutant[wildtype != mutant & delta_expr > -0.5,delta_expr]) #0.63838
+dt_mutant[delta_expr > -1, delta_D6343.3_normAUC := delta_D6343.3_AUC - (lm_D6343.3$coefficients[2] * delta_expr)]
+
+lm_D6271.3 <- lm(dt_mutant[wildtype != mutant & delta_expr > -0.5,delta_D6271.3_AUC] ~ dt_mutant[wildtype != mutant & delta_expr > -0.5,delta_expr]) #0.48909
+dt_mutant[delta_expr > -1, delta_D6271.3_normAUC := delta_D6271.3_AUC - (lm_D6271.3$coefficients[2] * delta_expr)]
+
+lm_D5220.3 <- lm(dt_mutant[wildtype != mutant & delta_expr > -0.5,delta_D5220.3_AUC] ~ dt_mutant[wildtype != mutant & delta_expr > -0.5,delta_expr]) #0.53003
+dt_mutant[delta_expr > -1, delta_D5220.3_normAUC := delta_D5220.3_AUC - (lm_D5220.3$coefficients[2] * delta_expr)]
+
+lm_D5417.3 <- lm(dt_mutant[wildtype != mutant & delta_expr > -0.5,delta_D5417.3_AUC] ~ dt_mutant[wildtype != mutant & delta_expr > -0.5,delta_expr]) # 0.6391
+dt_mutant[delta_expr > -1, delta_D5417.3_normAUC := delta_D5417.3_AUC - (lm_D5417.3$coefficients[2] * delta_expr)]
+
+lm_D5379.3 <- lm(dt_mutant[wildtype != mutant & delta_expr > -0.5,delta_D5379.3_AUC] ~ dt_mutant[wildtype != mutant & delta_expr > -0.5,delta_expr]) #0.44811 
+dt_mutant[delta_expr > -1, delta_D5379.3_normAUC := delta_D5379.3_AUC - (lm_D5379.3$coefficients[2] * delta_expr)]
+
+lm_D5338.4 <- lm(dt_mutant[wildtype != mutant & delta_expr > -0.5,delta_D5338.4_AUC] ~ dt_mutant[wildtype != mutant & delta_expr > -0.5,delta_expr]) #0.47022
+dt_mutant[delta_expr > -1, delta_D5338.4_normAUC := delta_D5338.4_AUC - (lm_D5338.4$coefficients[2] * delta_expr)]
+
+lm_D6391.4 <- lm(dt_mutant[wildtype != mutant & delta_expr > -0.5,delta_D6391.4_AUC] ~ dt_mutant[wildtype != mutant & delta_expr > -0.5,delta_expr]) #0.49721
+dt_mutant[delta_expr > -1, delta_D6391.4_normAUC := delta_D6391.4_AUC - (lm_D6391.4$coefficients[2] * delta_expr)]
+
+lm_D6404.4 <- lm(dt_mutant[wildtype != mutant & delta_expr > -0.5,delta_D6404.4_AUC] ~ dt_mutant[wildtype != mutant & delta_expr > -0.5,delta_expr]) #0.43672 
+dt_mutant[delta_expr > -1, delta_D6404.4_normAUC := delta_D6404.4_AUC - (lm_D6404.4$coefficients[2] * delta_expr)]
+
+lm_D5733.4 <- lm(dt_mutant[wildtype != mutant & delta_expr > -0.5,delta_D5733.4_AUC] ~ dt_mutant[wildtype != mutant & delta_expr > -0.5,delta_expr]) #0.4110
+dt_mutant[delta_expr > -1, delta_D5733.4_normAUC := delta_D5733.4_AUC - (lm_D5733.4$coefficients[2] * delta_expr)]
+
+lm_D6343.4 <- lm(dt_mutant[wildtype != mutant & delta_expr > -0.5,delta_D6343.4_AUC] ~ dt_mutant[wildtype != mutant & delta_expr > -0.5,delta_expr]) #0.42439
+dt_mutant[delta_expr > -1, delta_D6343.4_normAUC := delta_D6343.4_AUC - (lm_D6343.4$coefficients[2] * delta_expr)]
+
+lm_D6271.4 <- lm(dt_mutant[wildtype != mutant & delta_expr > -0.5,delta_D6271.4_AUC] ~ dt_mutant[wildtype != mutant & delta_expr > -0.5,delta_expr]) #0.42173
+dt_mutant[delta_expr > -1, delta_D6271.4_normAUC := delta_D6271.4_AUC - (lm_D6271.4$coefficients[2] * delta_expr)]
+
+lm_D5220.4 <- lm(dt_mutant[wildtype != mutant & delta_expr > -0.5,delta_D5220.4_AUC] ~ dt_mutant[wildtype != mutant & delta_expr > -0.5,delta_expr]) #0.43962 
+dt_mutant[delta_expr > -1, delta_D5220.4_normAUC := delta_D5220.4_AUC - (lm_D5220.4$coefficients[2] * delta_expr)]
+
+lm_D5417.4 <- lm(dt_mutant[wildtype != mutant & delta_expr > -0.5,delta_D5417.4_AUC] ~ dt_mutant[wildtype != mutant & delta_expr > -0.5,delta_expr]) #0.46937  
+dt_mutant[delta_expr > -1, delta_D5417.4_normAUC := delta_D5417.4_AUC - (lm_D5417.4$coefficients[2] * delta_expr)]
+
+lm_D5379.4 <- lm(dt_mutant[wildtype != mutant & delta_expr > -0.5,delta_D5379.4_AUC] ~ dt_mutant[wildtype != mutant & delta_expr > -0.5,delta_expr]) #0.33859
+dt_mutant[delta_expr > -1, delta_D5379.4_normAUC := delta_D5379.4_AUC - (lm_D5379.4$coefficients[2] * delta_expr)]
+
+par(mfrow=c(6,3))
+
+plot(dt_mutant[delta_expr > -1,delta_expr],dt_mutant[delta_expr > -1,delta_D5338.3_normAUC],pch=16,col="#00000040",xlab="mutant expression",ylab="mutant sera expr-norm AUC [D5338.3]"); abline(h=0,lty=2,col="red")
+
+plot(dt_mutant[delta_expr > -1,delta_expr],dt_mutant[delta_expr > -1,delta_D6391.3_normAUC],pch=16,col="#00000040",xlab="mutant expression",ylab="mutant sera expr-norm AUC [D6391.3]"); abline(h=0,lty=2,col="red")
+
+plot(dt_mutant[delta_expr > -1,delta_expr],dt_mutant[delta_expr > -1,delta_D6404.3_normAUC],pch=16,col="#00000040",xlab="mutant expression",ylab="mutant sera expr-norm AUC [D6404.3]");  abline(h=0,lty=2,col="red")
+
+plot(dt_mutant[delta_expr > -1,delta_expr],dt_mutant[delta_expr > -1,delta_D5733.3_normAUC],pch=16,col="#00000040",xlab="mutant expression",ylab="mutant sera expr-norm AUC [D5733.3]");  abline(h=0,lty=2,col="red")
+
+plot(dt_mutant[delta_expr > -1,delta_expr],dt_mutant[delta_expr > -1,delta_D6343.3_normAUC],pch=16,col="#00000040",xlab="mutant expression",ylab="mutant sera expr-norm AUC [D6343.3]"); abline(h=0,lty=2,col="red")
+
+plot(dt_mutant[delta_expr > -1,delta_expr],dt_mutant[delta_expr > -1,delta_D6271.3_normAUC],pch=16,col="#00000040",xlab="mutant expression",ylab="mutant sera expr-norm AUC [D6271.3]");  abline(h=0,lty=2,col="red")
+
+plot(dt_mutant[delta_expr > -1,delta_expr],dt_mutant[delta_expr > -1,delta_D5220.3_normAUC],pch=16,col="#00000040",xlab="mutant expression",ylab="mutant sera expr-norm AUC [D5220.3]"); abline(h=0,lty=2,col="red")
+
+plot(dt_mutant[delta_expr > -1,delta_expr],dt_mutant[delta_expr > -1,delta_D5417.3_normAUC],pch=16,col="#00000040",xlab="mutant expression",ylab="mutant sera expr-norm AUC [D5417.3]"); abline(h=0,lty=2,col="red")
+
+plot(dt_mutant[delta_expr > -1,delta_expr],dt_mutant[delta_expr > -1,delta_D5379.3_normAUC],pch=16,col="#00000040",xlab="mutant expression",ylab="mutant sera expr-norm AUC [D5379.3]"); abline(h=0,lty=2,col="red")
+
+plot(dt_mutant[delta_expr > -1,delta_expr],dt_mutant[delta_expr > -1,delta_D5338.4_normAUC],pch=16,col="#00000040",xlab="mutant expression",ylab="mutant sera expr-norm AUC [D5338.4]"); abline(h=0,lty=2,col="red")
+
+plot(dt_mutant[delta_expr > -1,delta_expr],dt_mutant[delta_expr > -1,delta_D6391.4_normAUC],pch=16,col="#00000040",xlab="mutant expression",ylab="mutant sera expr-norm AUC [D6391.4]"); abline(h=0,lty=2,col="red")
+
+plot(dt_mutant[delta_expr > -1,delta_expr],dt_mutant[delta_expr > -1,delta_D6404.4_normAUC],pch=16,col="#00000040",xlab="mutant expression",ylab="mutant sera expr-norm AUC [D6404.4]");  abline(h=0,lty=2,col="red")
+
+plot(dt_mutant[delta_expr > -1,delta_expr],dt_mutant[delta_expr > -1,delta_D5733.4_normAUC],pch=16,col="#00000040",xlab="mutant expression",ylab="mutant sera expr-norm AUC [D5733.4]");  abline(h=0,lty=2,col="red")
+
+plot(dt_mutant[delta_expr > -1,delta_expr],dt_mutant[delta_expr > -1,delta_D6343.4_normAUC],pch=16,col="#00000040",xlab="mutant expression",ylab="mutant sera expr-norm AUC [D6343.4]"); abline(h=0,lty=2,col="red")
+
+plot(dt_mutant[delta_expr > -1,delta_expr],dt_mutant[delta_expr > -1,delta_D6271.4_normAUC],pch=16,col="#00000040",xlab="mutant expression",ylab="mutant sera expr-norm AUC [D6271.4]");  abline(h=0,lty=2,col="red")
+
+plot(dt_mutant[delta_expr > -1,delta_expr],dt_mutant[delta_expr > -1,delta_D5220.4_normAUC],pch=16,col="#00000040",xlab="mutant expression",ylab="mutant sera expr-norm AUC [D5220.4]"); abline(h=0,lty=2,col="red")
+
+plot(dt_mutant[delta_expr > -1,delta_expr],dt_mutant[delta_expr > -1,delta_D5417.4_normAUC],pch=16,col="#00000040",xlab="mutant expression",ylab="mutant sera expr-norm AUC [D5417.4]"); abline(h=0,lty=2,col="red")
+
+plot(dt_mutant[delta_expr > -1,delta_expr],dt_mutant[delta_expr > -1,delta_D5379.4_normAUC],pch=16,col="#00000040",xlab="mutant expression",ylab="mutant sera expr-norm AUC [D5379.4]"); abline(h=0,lty=2,col="red")
+```
+
+<img src="collapse_barcodes_SARSr-DMS_files/figure-gfm/derive_norm_AUC-1.png" style="display: block; margin: auto;" />
+Normalization coefficients were: D5338.3 0.4864825, D6391.3 0.456864,
+D6404.3 0.5331416, D5733.3 0.6618997, D6343.3 0.6383831, and D6271.3
+0.4890946, D5220.3 0.5300349, D5417.3 0.6391347, D5379.3 0.4481114,
+D5338.4 0.4702191, D6391.4 0.4972147, D6404.4 0.4367186, D5733.4
+0.4110326, D6343.4 0.4243936, and D6271.4 0.4217264, D5220.4 0.4396214,
+D5417.4 0.469366, D5379.4 0.3385909,
+
+## Heatmaps!
+
+Make heatmaps of raw AUC as well as delta-AUC *expression-normalized*
+(and expression-censored).
+
+Order factor variables for plotting.
+
+``` r
+#order targets for plotting
+dt_mutant$target <- factor(dt_mutant$target,levels=c("SARS-CoV-2_WH1","SARS-CoV-2_XBB15","SARS-CoV-1_Urbani","PRD-0038"))
+#order mutant as a factor for grouping by rough biochemical grouping
+dt_mutant$mutant <- factor(dt_mutant$mutant, levels=c("-","C","P","G","V","M","L","I","A","F","W","Y","T","S","N","Q","E","D","H","K","R"))
+#order the sites character vector (becuase of 372a number for the PRD0038 insertion)
+dt_mutant$site_SARS2 <-factor(dt_mutant$site_SARS2,levels=sort(unique(dt_mutant$site_SARS2)))
+dt_mutant$site <-factor(dt_mutant$site,levels=sort(unique(dt_mutant$site)))
+
+#add character vector indicating wildtype to use as plotting symbols for wt
+dt_mutant[,wildtype_indicator := ""]
+dt_mutant[as.character(mutant)==as.character(wildtype),wildtype_indicator := "x"]
+
+#make temp long-form data frame
+temp <- data.table::melt(dt_mutant[, .(target,site,site_SARS2,mutant,wildtype_indicator,
+                                      delta_D5338.3_normAUC,
+                                      delta_D6391.3_normAUC,
+                                      delta_D6404.3_normAUC,
+                                      delta_D5733.3_normAUC,
+                                      delta_D6343.3_normAUC,
+                                      delta_D6271.3_normAUC,
+                                      delta_D5220.3_normAUC,
+                                      delta_D5417.3_normAUC,
+                                      delta_D5379.3_normAUC,
+                                      delta_D5338.4_normAUC,
+                                      delta_D6391.4_normAUC,
+                                      delta_D6404.4_normAUC,
+                                      delta_D5733.4_normAUC,
+                                      delta_D6343.4_normAUC,
+                                      delta_D6271.4_normAUC,
+                                      delta_D5220.4_normAUC,
+                                      delta_D5417.4_normAUC,
+                                      delta_D5379.4_normAUC)],
+                         id.vars=c("target","site","site_SARS2","mutant","wildtype_indicator"),
+                         measure.vars=c("delta_D5338.3_normAUC",
+                                      "delta_D6391.3_normAUC",
+                                      "delta_D6404.3_normAUC",
+                                      "delta_D5733.3_normAUC",
+                                      "delta_D6343.3_normAUC",
+                                      "delta_D6271.3_normAUC",
+                                      "delta_D5220.3_normAUC",
+                                      "delta_D5417.3_normAUC",
+                                      "delta_D5379.3_normAUC",
+                                      "delta_D5338.4_normAUC",
+                                      "delta_D6391.4_normAUC",
+                                      "delta_D6404.4_normAUC",
+                                      "delta_D5733.4_normAUC",
+                                      "delta_D6343.4_normAUC",
+                                      "delta_D6271.4_normAUC",
+                                      "delta_D5220.4_normAUC",
+                                      "delta_D5417.4_normAUC",
+                                      "delta_D5379.4_normAUC"),
+                         variable.name="measurement",value.name="value")
+
+#for method to duplicate aa labels on right side of plot https://github.com/tidyverse/ggplot2/issues/3171
+guide_axis_label_trans <- function(label_trans = identity, ...) {
+  axis_guide <- guide_axis(...)
+  axis_guide$label_trans <- rlang::as_function(label_trans)
+  class(axis_guide) <- c("guide_axis_trans", class(axis_guide))
+  axis_guide
+}
+
+guide_train.guide_axis_trans <- function(x, ...) {
+  trained <- NextMethod()
+  trained$key$.label <- x$label_trans(trained$key$.label)
+  trained
+}
+```
+
+Make heatmaps faceted by target, showing delta-AUC of muts relative to
+respective wildtype for each serum
+
+D5338.3
+
+``` r
+p1 <- ggplot(temp[measurement=="delta_D5338.3_normAUC",],
+             aes(site_SARS2,mutant))+geom_tile(aes(fill=value),color="black",lwd=0.1)+
+  scale_fill_gradientn(colours=c("#A94E35","#A94E35","#F48365","#FFFFFF","#7378B9","#383C6C","#383C6C"), #if showing blue color
+                       limits=c(-3,3),
+                       values=c(0/6,2/6,2.5/6,3/6,3.5/6,4/6,6/6), #effective coloring from -1 to +1
+                       na.value="gray70")+
+  # scale_fill_gradientn(colours=c("#A94E35","#A94E35","#F48365","#FFFFFF","#FFFFFF","#FFFFFF","#FFFFFF"), #if censoring >0 blue
+  #                      limits=c(-5,2),
+  #                      values=c(0/7,3/7,4/7,5/7,5.5/7,6/7, 7/7),
+  #                      na.value="gray70")+
+  #scale_x_continuous(expand=c(0,0),breaks=c(331,seq(335,530,by=5)))+
+  labs(x="",y="")+theme_classic(base_size=9)+
+  coord_equal()+theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.6,face="bold",size=10),axis.text.y=element_text(face="bold",size=10))+
+  facet_wrap(~target,nrow=6)+
+  guides(y.sec=guide_axis_label_trans())+
+  geom_text(aes(label=wildtype_indicator),size=2,color="gray10")+
+  theme(strip.text.x = element_text(size = 18))
+
+p1
+```
+
+<img src="collapse_barcodes_SARSr-DMS_files/figure-gfm/heatmap_DMS_delta-normAUC-by-target_D5338.3-sera-1.png" style="display: block; margin: auto;" />
+
+``` r
+invisible(dev.print(pdf, paste(config$final_variant_scores_dir,"/lib40_heatmap_SSM_delta-normAUC-by-target_D5338.3.pdf",sep="")))
+```
+
+D6391.3
+
+``` r
+p1 <- ggplot(temp[measurement=="delta_D6391.3_normAUC",],
+             aes(site_SARS2,mutant))+geom_tile(aes(fill=value),color="black",lwd=0.1)+
+  scale_fill_gradientn(colours=c("#A94E35","#A94E35","#F48365","#FFFFFF","#7378B9","#383C6C","#383C6C"), #if showing blue color
+                       limits=c(-3,3),
+                       values=c(0/6,2/6,2.5/6,3/6,3.5/6,4/6,6/6), #effective coloring from -1 to +1
+                       na.value="gray70")+
+  # scale_fill_gradientn(colours=c("#A94E35","#A94E35","#F48365","#FFFFFF","#FFFFFF","#FFFFFF","#FFFFFF"), #if censoring >0 blue
+  #                      limits=c(-5,2),
+  #                      values=c(0/7,3/7,4/7,5/7,5.5/7,6/7, 7/7),
+  #                      na.value="gray70")+
+  #scale_x_continuous(expand=c(0,0),breaks=c(331,seq(335,530,by=5)))+
+  labs(x="",y="")+theme_classic(base_size=9)+
+  coord_equal()+theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.6,face="bold",size=10),axis.text.y=element_text(face="bold",size=10))+
+  facet_wrap(~target,nrow=6)+
+  guides(y.sec=guide_axis_label_trans())+
+  geom_text(aes(label=wildtype_indicator),size=2,color="gray10")+
+  theme(strip.text.x = element_text(size = 18))
+
+p1
+```
+
+<img src="collapse_barcodes_SARSr-DMS_files/figure-gfm/heatmap_DMS_delta-normAUC-by-target_D6391.3-sera-1.png" style="display: block; margin: auto;" />
+
+``` r
+invisible(dev.print(pdf, paste(config$final_variant_scores_dir,"/lib40_heatmap_SSM_delta-normAUC-by-target_D6391.3.pdf",sep="")))
+```
+
+D6404.3
+
+``` r
+p1 <- ggplot(temp[measurement=="delta_D6404.3_normAUC",],
+             aes(site_SARS2,mutant))+geom_tile(aes(fill=value),color="black",lwd=0.1)+
+  scale_fill_gradientn(colours=c("#A94E35","#A94E35","#F48365","#FFFFFF","#7378B9","#383C6C","#383C6C"), #if showing blue color
+                       limits=c(-3,3),
+                       values=c(0/6,2/6,2.5/6,3/6,3.5/6,4/6,6/6), #effective coloring from -1 to +1
+                       na.value="gray70")+
+  # scale_fill_gradientn(colours=c("#A94E35","#A94E35","#F48365","#FFFFFF","#FFFFFF","#FFFFFF","#FFFFFF"), #if censoring >0 blue
+  #                      limits=c(-5,2),
+  #                      values=c(0/7,3/7,4/7,5/7,5.5/7,6/7, 7/7),
+  #                      na.value="gray70")+
+  #scale_x_continuous(expand=c(0,0),breaks=c(331,seq(335,530,by=5)))+
+  labs(x="",y="")+theme_classic(base_size=9)+
+  coord_equal()+theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.6,face="bold",size=10),axis.text.y=element_text(face="bold",size=10))+
+  facet_wrap(~target,nrow=6)+
+  guides(y.sec=guide_axis_label_trans())+
+  geom_text(aes(label=wildtype_indicator),size=2,color="gray10")+
+  theme(strip.text.x = element_text(size = 18))
+
+p1
+```
+
+<img src="collapse_barcodes_SARSr-DMS_files/figure-gfm/heatmap_DMS_delta-normAUC-by-target_D6404.3-sera-1.png" style="display: block; margin: auto;" />
+
+``` r
+invisible(dev.print(pdf, paste(config$final_variant_scores_dir,"/lib40_heatmap_SSM_delta-normAUC-by-target_D6404.3.pdf",sep="")))
+```
+
+D5733.3
+
+``` r
+p1 <- ggplot(temp[measurement=="delta_D5733.3_normAUC",],
+             aes(site_SARS2,mutant))+geom_tile(aes(fill=value),color="black",lwd=0.1)+
+  scale_fill_gradientn(colours=c("#A94E35","#A94E35","#F48365","#FFFFFF","#7378B9","#383C6C","#383C6C"), #if showing blue color
+                       limits=c(-3,3),
+                       values=c(0/6,2/6,2.5/6,3/6,3.5/6,4/6,6/6), #effective coloring from -1 to +1
+                       na.value="gray70")+
+  # scale_fill_gradientn(colours=c("#A94E35","#A94E35","#F48365","#FFFFFF","#FFFFFF","#FFFFFF","#FFFFFF"), #if censoring >0 blue
+  #                      limits=c(-5,2),
+  #                      values=c(0/7,3/7,4/7,5/7,5.5/7,6/7, 7/7),
+  #                      na.value="gray70")+
+  #scale_x_continuous(expand=c(0,0),breaks=c(331,seq(335,530,by=5)))+
+  labs(x="",y="")+theme_classic(base_size=9)+
+  coord_equal()+theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.6,face="bold",size=10),axis.text.y=element_text(face="bold",size=10))+
+  facet_wrap(~target,nrow=6)+
+  guides(y.sec=guide_axis_label_trans())+
+  geom_text(aes(label=wildtype_indicator),size=2,color="gray10")+
+  theme(strip.text.x = element_text(size = 18))
+
+p1
+```
+
+<img src="collapse_barcodes_SARSr-DMS_files/figure-gfm/heatmap_DMS_delta-normAUC-by-target_D5733.3-sera-1.png" style="display: block; margin: auto;" />
+
+``` r
+invisible(dev.print(pdf, paste(config$final_variant_scores_dir,"/lib40_heatmap_SSM_delta-normAUC-by-target_D5733.3.pdf",sep="")))
+```
+
+D6343.3
+
+``` r
+p1 <- ggplot(temp[measurement=="delta_D6343.3_normAUC",],
+             aes(site_SARS2,mutant))+geom_tile(aes(fill=value),color="black",lwd=0.1)+
+  scale_fill_gradientn(colours=c("#A94E35","#A94E35","#F48365","#FFFFFF","#7378B9","#383C6C","#383C6C"), #if showing blue color
+                       limits=c(-3,3),
+                       values=c(0/6,2/6,2.5/6,3/6,3.5/6,4/6,6/6), #effective coloring from -1 to +1
+                       na.value="gray70")+
+  # scale_fill_gradientn(colours=c("#A94E35","#A94E35","#F48365","#FFFFFF","#FFFFFF","#FFFFFF","#FFFFFF"), #if censoring >0 blue
+  #                      limits=c(-5,2),
+  #                      values=c(0/7,3/7,4/7,5/7,5.5/7,6/7, 7/7),
+  #                      na.value="gray70")+
+  #scale_x_continuous(expand=c(0,0),breaks=c(331,seq(335,530,by=5)))+
+  labs(x="",y="")+theme_classic(base_size=9)+
+  coord_equal()+theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.6,face="bold",size=10),axis.text.y=element_text(face="bold",size=10))+
+  facet_wrap(~target,nrow=6)+
+  guides(y.sec=guide_axis_label_trans())+
+  geom_text(aes(label=wildtype_indicator),size=2,color="gray10")+
+  theme(strip.text.x = element_text(size = 18))
+
+p1
+```
+
+<img src="collapse_barcodes_SARSr-DMS_files/figure-gfm/heatmap_DMS_delta-normAUC-by-target_D6343.3-sera-1.png" style="display: block; margin: auto;" />
+
+``` r
+invisible(dev.print(pdf, paste(config$final_variant_scores_dir,"/lib40_heatmap_SSM_delta-normAUC-by-target_D6343.3.pdf",sep="")))
+```
+
+D6271.3
+
+``` r
+p1 <- ggplot(temp[measurement=="delta_D6271.3_normAUC",],
+             aes(site_SARS2,mutant))+geom_tile(aes(fill=value),color="black",lwd=0.1)+
+  scale_fill_gradientn(colours=c("#A94E35","#A94E35","#F48365","#FFFFFF","#7378B9","#383C6C","#383C6C"), #if showing blue color
+                       limits=c(-3,3),
+                       values=c(0/6,2/6,2.5/6,3/6,3.5/6,4/6,6/6), #effective coloring from -1 to +1
+                       na.value="gray70")+
+  # scale_fill_gradientn(colours=c("#A94E35","#A94E35","#F48365","#FFFFFF","#FFFFFF","#FFFFFF","#FFFFFF"), #if censoring >0 blue
+  #                      limits=c(-5,2),
+  #                      values=c(0/7,3/7,4/7,5/7,5.5/7,6/7, 7/7),
+  #                      na.value="gray70")+
+  #scale_x_continuous(expand=c(0,0),breaks=c(331,seq(335,530,by=5)))+
+  labs(x="",y="")+theme_classic(base_size=9)+
+  coord_equal()+theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.6,face="bold",size=10),axis.text.y=element_text(face="bold",size=10))+
+  facet_wrap(~target,nrow=6)+
+  guides(y.sec=guide_axis_label_trans())+
+  geom_text(aes(label=wildtype_indicator),size=2,color="gray10")+
+  theme(strip.text.x = element_text(size = 18))
+
+p1
+```
+
+<img src="collapse_barcodes_SARSr-DMS_files/figure-gfm/heatmap_DMS_delta-normAUC-by-target_D6271.3-sera-1.png" style="display: block; margin: auto;" />
+
+``` r
+invisible(dev.print(pdf, paste(config$final_variant_scores_dir,"/lib40_heatmap_SSM_delta-normAUC-by-target_D6271.3.pdf",sep="")))
+```
+
+D5220.3
+
+``` r
+p1 <- ggplot(temp[measurement=="delta_D5220.3_normAUC",],
+             aes(site_SARS2,mutant))+geom_tile(aes(fill=value),color="black",lwd=0.1)+
+  scale_fill_gradientn(colours=c("#A94E35","#A94E35","#F48365","#FFFFFF","#7378B9","#383C6C","#383C6C"), #if showing blue color
+                       limits=c(-3,3),
+                       values=c(0/6,2/6,2.5/6,3/6,3.5/6,4/6,6/6), #effective coloring from -1 to +1
+                       na.value="gray70")+
+  # scale_fill_gradientn(colours=c("#A94E35","#A94E35","#F48365","#FFFFFF","#FFFFFF","#FFFFFF","#FFFFFF"), #if censoring >0 blue
+  #                      limits=c(-5,2),
+  #                      values=c(0/7,3/7,4/7,5/7,5.5/7,6/7, 7/7),
+  #                      na.value="gray70")+
+  #scale_x_continuous(expand=c(0,0),breaks=c(331,seq(335,530,by=5)))+
+  labs(x="",y="")+theme_classic(base_size=9)+
+  coord_equal()+theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.6,face="bold",size=10),axis.text.y=element_text(face="bold",size=10))+
+  facet_wrap(~target,nrow=6)+
+  guides(y.sec=guide_axis_label_trans())+
+  geom_text(aes(label=wildtype_indicator),size=2,color="gray10")+
+  theme(strip.text.x = element_text(size = 18))
+
+p1
+```
+
+<img src="collapse_barcodes_SARSr-DMS_files/figure-gfm/heatmap_DMS_delta-normAUC-by-target_D5220.3-sera-1.png" style="display: block; margin: auto;" />
+
+``` r
+invisible(dev.print(pdf, paste(config$final_variant_scores_dir,"/lib40_heatmap_SSM_delta-normAUC-by-target_D5220.3.pdf",sep="")))
+```
+
+D5417.3
+
+``` r
+p1 <- ggplot(temp[measurement=="delta_D5417.3_normAUC",],
+             aes(site_SARS2,mutant))+geom_tile(aes(fill=value),color="black",lwd=0.1)+
+  scale_fill_gradientn(colours=c("#A94E35","#A94E35","#F48365","#FFFFFF","#7378B9","#383C6C","#383C6C"), #if showing blue color
+                       limits=c(-3,3),
+                       values=c(0/6,2/6,2.5/6,3/6,3.5/6,4/6,6/6), #effective coloring from -1 to +1
+                       na.value="gray70")+
+  # scale_fill_gradientn(colours=c("#A94E35","#A94E35","#F48365","#FFFFFF","#FFFFFF","#FFFFFF","#FFFFFF"), #if censoring >0 blue
+  #                      limits=c(-5,2),
+  #                      values=c(0/7,3/7,4/7,5/7,5.5/7,6/7, 7/7),
+  #                      na.value="gray70")+
+  #scale_x_continuous(expand=c(0,0),breaks=c(331,seq(335,530,by=5)))+
+  labs(x="",y="")+theme_classic(base_size=9)+
+  coord_equal()+theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.6,face="bold",size=10),axis.text.y=element_text(face="bold",size=10))+
+  facet_wrap(~target,nrow=6)+
+  guides(y.sec=guide_axis_label_trans())+
+  geom_text(aes(label=wildtype_indicator),size=2,color="gray10")+
+  theme(strip.text.x = element_text(size = 18))
+
+p1
+```
+
+<img src="collapse_barcodes_SARSr-DMS_files/figure-gfm/heatmap_DMS_delta-normAUC-by-target_D5417.3-sera-1.png" style="display: block; margin: auto;" />
+
+``` r
+invisible(dev.print(pdf, paste(config$final_variant_scores_dir,"/lib40_heatmap_SSM_delta-normAUC-by-target_D5417.3.pdf",sep="")))
+```
+
+D5379.3
+
+``` r
+p1 <- ggplot(temp[measurement=="delta_D5379.3_normAUC",],
+             aes(site_SARS2,mutant))+geom_tile(aes(fill=value),color="black",lwd=0.1)+
+  scale_fill_gradientn(colours=c("#A94E35","#A94E35","#F48365","#FFFFFF","#7378B9","#383C6C","#383C6C"), #if showing blue color
+                       limits=c(-3,3),
+                       values=c(0/6,2/6,2.5/6,3/6,3.5/6,4/6,6/6), #effective coloring from -1 to +1
+                       na.value="gray70")+
+  # scale_fill_gradientn(colours=c("#A94E35","#A94E35","#F48365","#FFFFFF","#FFFFFF","#FFFFFF","#FFFFFF"), #if censoring >0 blue
+  #                      limits=c(-5,2),
+  #                      values=c(0/7,3/7,4/7,5/7,5.5/7,6/7, 7/7),
+  #                      na.value="gray70")+
+  #scale_x_continuous(expand=c(0,0),breaks=c(331,seq(335,530,by=5)))+
+  labs(x="",y="")+theme_classic(base_size=9)+
+  coord_equal()+theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.6,face="bold",size=10),axis.text.y=element_text(face="bold",size=10))+
+  facet_wrap(~target,nrow=6)+
+  guides(y.sec=guide_axis_label_trans())+
+  geom_text(aes(label=wildtype_indicator),size=2,color="gray10")+
+  theme(strip.text.x = element_text(size = 18))
+
+p1
+```
+
+<img src="collapse_barcodes_SARSr-DMS_files/figure-gfm/heatmap_DMS_delta-normAUC-by-target_D5379.3-sera-1.png" style="display: block; margin: auto;" />
+
+``` r
+invisible(dev.print(pdf, paste(config$final_variant_scores_dir,"/lib40_heatmap_SSM_delta-normAUC-by-target_D5379.3.pdf",sep="")))
+```
+
+D5338.4
+
+``` r
+p1 <- ggplot(temp[measurement=="delta_D5338.4_normAUC",],
+             aes(site_SARS2,mutant))+geom_tile(aes(fill=value),color="black",lwd=0.1)+
+  scale_fill_gradientn(colours=c("#A94E35","#A94E35","#F48365","#FFFFFF","#7378B9","#383C6C","#383C6C"), #if showing blue color
+                       limits=c(-3,3),
+                       values=c(0/6,2/6,2.5/6,3/6,3.5/6,4/6,6/6), #effective coloring from -1 to +1
+                       na.value="gray70")+
+  # scale_fill_gradientn(colours=c("#A94E35","#A94E35","#F48365","#FFFFFF","#FFFFFF","#FFFFFF","#FFFFFF"), #if censoring >0 blue
+  #                      limits=c(-5,2),
+  #                      values=c(0/7,3/7,4/7,5/7,5.5/7,6/7, 7/7),
+  #                      na.value="gray70")+
+  #scale_x_continuous(expand=c(0,0),breaks=c(331,seq(335,530,by=5)))+
+  labs(x="",y="")+theme_classic(base_size=9)+
+  coord_equal()+theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.6,face="bold",size=10),axis.text.y=element_text(face="bold",size=10))+
+  facet_wrap(~target,nrow=6)+
+  guides(y.sec=guide_axis_label_trans())+
+  geom_text(aes(label=wildtype_indicator),size=2,color="gray10")+
+  theme(strip.text.x = element_text(size = 18))
+
+p1
+```
+
+<img src="collapse_barcodes_SARSr-DMS_files/figure-gfm/heatmap_DMS_delta-normAUC-by-target_D5338.4-sera-1.png" style="display: block; margin: auto;" />
+
+``` r
+invisible(dev.print(pdf, paste(config$final_variant_scores_dir,"/lib40_heatmap_SSM_delta-normAUC-by-target_D5338.4.pdf",sep="")))
+```
+
+D6391.4
+
+``` r
+p1 <- ggplot(temp[measurement=="delta_D6391.4_normAUC",],
+             aes(site_SARS2,mutant))+geom_tile(aes(fill=value),color="black",lwd=0.1)+
+  scale_fill_gradientn(colours=c("#A94E35","#A94E35","#F48365","#FFFFFF","#7378B9","#383C6C","#383C6C"), #if showing blue color
+                       limits=c(-3,3),
+                       values=c(0/6,2/6,2.5/6,3/6,3.5/6,4/6,6/6), #effective coloring from -1 to +1
+                       na.value="gray70")+
+  # scale_fill_gradientn(colours=c("#A94E35","#A94E35","#F48365","#FFFFFF","#FFFFFF","#FFFFFF","#FFFFFF"), #if censoring >0 blue
+  #                      limits=c(-5,2),
+  #                      values=c(0/7,3/7,4/7,5/7,5.5/7,6/7, 7/7),
+  #                      na.value="gray70")+
+  #scale_x_continuous(expand=c(0,0),breaks=c(331,seq(335,530,by=5)))+
+  labs(x="",y="")+theme_classic(base_size=9)+
+  coord_equal()+theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.6,face="bold",size=10),axis.text.y=element_text(face="bold",size=10))+
+  facet_wrap(~target,nrow=6)+
+  guides(y.sec=guide_axis_label_trans())+
+  geom_text(aes(label=wildtype_indicator),size=2,color="gray10")+
+  theme(strip.text.x = element_text(size = 18))
+
+p1
+```
+
+<img src="collapse_barcodes_SARSr-DMS_files/figure-gfm/heatmap_DMS_delta-normAUC-by-target_D6391.4-sera-1.png" style="display: block; margin: auto;" />
+
+``` r
+invisible(dev.print(pdf, paste(config$final_variant_scores_dir,"/lib40_heatmap_SSM_delta-normAUC-by-target_D6391.4.pdf",sep="")))
+```
+
+D6404.4
+
+``` r
+p1 <- ggplot(temp[measurement=="delta_D6404.4_normAUC",],
+             aes(site_SARS2,mutant))+geom_tile(aes(fill=value),color="black",lwd=0.1)+
+  scale_fill_gradientn(colours=c("#A94E35","#A94E35","#F48365","#FFFFFF","#7378B9","#383C6C","#383C6C"), #if showing blue color
+                       limits=c(-3,3),
+                       values=c(0/6,2/6,2.5/6,3/6,3.5/6,4/6,6/6), #effective coloring from -1 to +1
+                       na.value="gray70")+
+  # scale_fill_gradientn(colours=c("#A94E35","#A94E35","#F48365","#FFFFFF","#FFFFFF","#FFFFFF","#FFFFFF"), #if censoring >0 blue
+  #                      limits=c(-5,2),
+  #                      values=c(0/7,3/7,4/7,5/7,5.5/7,6/7, 7/7),
+  #                      na.value="gray70")+
+  #scale_x_continuous(expand=c(0,0),breaks=c(331,seq(335,530,by=5)))+
+  labs(x="",y="")+theme_classic(base_size=9)+
+  coord_equal()+theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.6,face="bold",size=10),axis.text.y=element_text(face="bold",size=10))+
+  facet_wrap(~target,nrow=6)+
+  guides(y.sec=guide_axis_label_trans())+
+  geom_text(aes(label=wildtype_indicator),size=2,color="gray10")+
+  theme(strip.text.x = element_text(size = 18))
+
+p1
+```
+
+<img src="collapse_barcodes_SARSr-DMS_files/figure-gfm/heatmap_DMS_delta-normAUC-by-target_D6404.4-sera-1.png" style="display: block; margin: auto;" />
+
+``` r
+invisible(dev.print(pdf, paste(config$final_variant_scores_dir,"/lib40_heatmap_SSM_delta-normAUC-by-target_D6404.4.pdf",sep="")))
+```
+
+D5733.4
+
+``` r
+p1 <- ggplot(temp[measurement=="delta_D5733.4_normAUC",],
+             aes(site_SARS2,mutant))+geom_tile(aes(fill=value),color="black",lwd=0.1)+
+  scale_fill_gradientn(colours=c("#A94E35","#A94E35","#F48365","#FFFFFF","#7378B9","#383C6C","#383C6C"), #if showing blue color
+                       limits=c(-3,3),
+                       values=c(0/6,2/6,2.5/6,3/6,3.5/6,4/6,6/6), #effective coloring from -1 to +1
+                       na.value="gray70")+
+  # scale_fill_gradientn(colours=c("#A94E35","#A94E35","#F48365","#FFFFFF","#FFFFFF","#FFFFFF","#FFFFFF"), #if censoring >0 blue
+  #                      limits=c(-5,2),
+  #                      values=c(0/7,3/7,4/7,5/7,5.5/7,6/7, 7/7),
+  #                      na.value="gray70")+
+  #scale_x_continuous(expand=c(0,0),breaks=c(331,seq(335,530,by=5)))+
+  labs(x="",y="")+theme_classic(base_size=9)+
+  coord_equal()+theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.6,face="bold",size=10),axis.text.y=element_text(face="bold",size=10))+
+  facet_wrap(~target,nrow=6)+
+  guides(y.sec=guide_axis_label_trans())+
+  geom_text(aes(label=wildtype_indicator),size=2,color="gray10")+
+  theme(strip.text.x = element_text(size = 18))
+
+p1
+```
+
+<img src="collapse_barcodes_SARSr-DMS_files/figure-gfm/heatmap_DMS_delta-normAUC-by-target_D5733.4-sera-1.png" style="display: block; margin: auto;" />
+
+``` r
+invisible(dev.print(pdf, paste(config$final_variant_scores_dir,"/lib40_heatmap_SSM_delta-normAUC-by-target_D5733.4.pdf",sep="")))
+```
+
+D6343.4
+
+``` r
+p1 <- ggplot(temp[measurement=="delta_D6343.4_normAUC",],
+             aes(site_SARS2,mutant))+geom_tile(aes(fill=value),color="black",lwd=0.1)+
+  scale_fill_gradientn(colours=c("#A94E35","#A94E35","#F48365","#FFFFFF","#7378B9","#383C6C","#383C6C"), #if showing blue color
+                       limits=c(-3,3),
+                       values=c(0/6,2/6,2.5/6,3/6,3.5/6,4/6,6/6), #effective coloring from -1 to +1
+                       na.value="gray70")+
+  # scale_fill_gradientn(colours=c("#A94E35","#A94E35","#F48365","#FFFFFF","#FFFFFF","#FFFFFF","#FFFFFF"), #if censoring >0 blue
+  #                      limits=c(-5,2),
+  #                      values=c(0/7,3/7,4/7,5/7,5.5/7,6/7, 7/7),
+  #                      na.value="gray70")+
+  #scale_x_continuous(expand=c(0,0),breaks=c(331,seq(335,530,by=5)))+
+  labs(x="",y="")+theme_classic(base_size=9)+
+  coord_equal()+theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.6,face="bold",size=10),axis.text.y=element_text(face="bold",size=10))+
+  facet_wrap(~target,nrow=6)+
+  guides(y.sec=guide_axis_label_trans())+
+  geom_text(aes(label=wildtype_indicator),size=2,color="gray10")+
+  theme(strip.text.x = element_text(size = 18))
+
+p1
+```
+
+<img src="collapse_barcodes_SARSr-DMS_files/figure-gfm/heatmap_DMS_delta-normAUC-by-target_D6343.4-sera-1.png" style="display: block; margin: auto;" />
+
+``` r
+invisible(dev.print(pdf, paste(config$final_variant_scores_dir,"/lib40_heatmap_SSM_delta-normAUC-by-target_D6343.4.pdf",sep="")))
+```
+
+D6271.4
+
+``` r
+p1 <- ggplot(temp[measurement=="delta_D6271.4_normAUC",],
+             aes(site_SARS2,mutant))+geom_tile(aes(fill=value),color="black",lwd=0.1)+
+  scale_fill_gradientn(colours=c("#A94E35","#A94E35","#F48365","#FFFFFF","#7378B9","#383C6C","#383C6C"), #if showing blue color
+                       limits=c(-3,3),
+                       values=c(0/6,2/6,2.5/6,3/6,3.5/6,4/6,6/6), #effective coloring from -1 to +1
+                       na.value="gray70")+
+  # scale_fill_gradientn(colours=c("#A94E35","#A94E35","#F48365","#FFFFFF","#FFFFFF","#FFFFFF","#FFFFFF"), #if censoring >0 blue
+  #                      limits=c(-5,2),
+  #                      values=c(0/7,3/7,4/7,5/7,5.5/7,6/7, 7/7),
+  #                      na.value="gray70")+
+  #scale_x_continuous(expand=c(0,0),breaks=c(331,seq(335,530,by=5)))+
+  labs(x="",y="")+theme_classic(base_size=9)+
+  coord_equal()+theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.6,face="bold",size=10),axis.text.y=element_text(face="bold",size=10))+
+  facet_wrap(~target,nrow=6)+
+  guides(y.sec=guide_axis_label_trans())+
+  geom_text(aes(label=wildtype_indicator),size=2,color="gray10")+
+  theme(strip.text.x = element_text(size = 18))
+
+p1
+```
+
+<img src="collapse_barcodes_SARSr-DMS_files/figure-gfm/heatmap_DMS_delta-normAUC-by-target_D6271.4-sera-1.png" style="display: block; margin: auto;" />
+
+``` r
+invisible(dev.print(pdf, paste(config$final_variant_scores_dir,"/lib40_heatmap_SSM_delta-normAUC-by-target_D6271.4.pdf",sep="")))
+```
+
+D5220.4
+
+``` r
+p1 <- ggplot(temp[measurement=="delta_D5220.4_normAUC",],
+             aes(site_SARS2,mutant))+geom_tile(aes(fill=value),color="black",lwd=0.1)+
+  scale_fill_gradientn(colours=c("#A94E35","#A94E35","#F48365","#FFFFFF","#7378B9","#383C6C","#383C6C"), #if showing blue color
+                       limits=c(-3,3),
+                       values=c(0/6,2/6,2.5/6,3/6,3.5/6,4/6,6/6), #effective coloring from -1 to +1
+                       na.value="gray70")+
+  # scale_fill_gradientn(colours=c("#A94E35","#A94E35","#F48365","#FFFFFF","#FFFFFF","#FFFFFF","#FFFFFF"), #if censoring >0 blue
+  #                      limits=c(-5,2),
+  #                      values=c(0/7,3/7,4/7,5/7,5.5/7,6/7, 7/7),
+  #                      na.value="gray70")+
+  #scale_x_continuous(expand=c(0,0),breaks=c(331,seq(335,530,by=5)))+
+  labs(x="",y="")+theme_classic(base_size=9)+
+  coord_equal()+theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.6,face="bold",size=10),axis.text.y=element_text(face="bold",size=10))+
+  facet_wrap(~target,nrow=6)+
+  guides(y.sec=guide_axis_label_trans())+
+  geom_text(aes(label=wildtype_indicator),size=2,color="gray10")+
+  theme(strip.text.x = element_text(size = 18))
+
+p1
+```
+
+<img src="collapse_barcodes_SARSr-DMS_files/figure-gfm/heatmap_DMS_delta-normAUC-by-target_D5220.4-sera-1.png" style="display: block; margin: auto;" />
+
+``` r
+invisible(dev.print(pdf, paste(config$final_variant_scores_dir,"/lib40_heatmap_SSM_delta-normAUC-by-target_D5220.4.pdf",sep="")))
+```
+
+D5417.4
+
+``` r
+p1 <- ggplot(temp[measurement=="delta_D5417.4_normAUC",],
+             aes(site_SARS2,mutant))+geom_tile(aes(fill=value),color="black",lwd=0.1)+
+  scale_fill_gradientn(colours=c("#A94E35","#A94E35","#F48365","#FFFFFF","#7378B9","#383C6C","#383C6C"), #if showing blue color
+                       limits=c(-3,3),
+                       values=c(0/6,2/6,2.5/6,3/6,3.5/6,4/6,6/6), #effective coloring from -1 to +1
+                       na.value="gray70")+
+  # scale_fill_gradientn(colours=c("#A94E35","#A94E35","#F48365","#FFFFFF","#FFFFFF","#FFFFFF","#FFFFFF"), #if censoring >0 blue
+  #                      limits=c(-5,2),
+  #                      values=c(0/7,3/7,4/7,5/7,5.5/7,6/7, 7/7),
+  #                      na.value="gray70")+
+  #scale_x_continuous(expand=c(0,0),breaks=c(331,seq(335,530,by=5)))+
+  labs(x="",y="")+theme_classic(base_size=9)+
+  coord_equal()+theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.6,face="bold",size=10),axis.text.y=element_text(face="bold",size=10))+
+  facet_wrap(~target,nrow=6)+
+  guides(y.sec=guide_axis_label_trans())+
+  geom_text(aes(label=wildtype_indicator),size=2,color="gray10")+
+  theme(strip.text.x = element_text(size = 18))
+
+p1
+```
+
+<img src="collapse_barcodes_SARSr-DMS_files/figure-gfm/heatmap_DMS_delta-normAUC-by-target_D5417.4-sera-1.png" style="display: block; margin: auto;" />
+
+``` r
+invisible(dev.print(pdf, paste(config$final_variant_scores_dir,"/lib40_heatmap_SSM_delta-normAUC-by-target_D5417.4.pdf",sep="")))
+```
+
+D5379.4
+
+``` r
+p1 <- ggplot(temp[measurement=="delta_D5379.4_normAUC",],
+             aes(site_SARS2,mutant))+geom_tile(aes(fill=value),color="black",lwd=0.1)+
+  scale_fill_gradientn(colours=c("#A94E35","#A94E35","#F48365","#FFFFFF","#7378B9","#383C6C","#383C6C"), #if showing blue color
+                       limits=c(-3,3),
+                       values=c(0/6,2/6,2.5/6,3/6,3.5/6,4/6,6/6), #effective coloring from -1 to +1
+                       na.value="gray70")+
+  # scale_fill_gradientn(colours=c("#A94E35","#A94E35","#F48365","#FFFFFF","#FFFFFF","#FFFFFF","#FFFFFF"), #if censoring >0 blue
+  #                      limits=c(-5,2),
+  #                      values=c(0/7,3/7,4/7,5/7,5.5/7,6/7, 7/7),
+  #                      na.value="gray70")+
+  #scale_x_continuous(expand=c(0,0),breaks=c(331,seq(335,530,by=5)))+
+  labs(x="",y="")+theme_classic(base_size=9)+
+  coord_equal()+theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.6,face="bold",size=10),axis.text.y=element_text(face="bold",size=10))+
+  facet_wrap(~target,nrow=6)+
+  guides(y.sec=guide_axis_label_trans())+
+  geom_text(aes(label=wildtype_indicator),size=2,color="gray10")+
+  theme(strip.text.x = element_text(size = 18))
+
+p1
+```
+
+<img src="collapse_barcodes_SARSr-DMS_files/figure-gfm/heatmap_DMS_delta-normAUC-by-target_D5379.4-sera-1.png" style="display: block; margin: auto;" />
+
+``` r
+invisible(dev.print(pdf, paste(config$final_variant_scores_dir,"/lib40_heatmap_SSM_delta-normAUC-by-target_D5379.4.pdf",sep="")))
+```
+
+Let’s also output heatmaps by background, comparing the six vaccine
+formulations.
+
+For SARS-CoV-2_WH1:
+
+``` r
+temp$measurement <- factor(temp$measurement,levels=c("delta_D5338.3_normAUC","delta_D5338.4_normAUC",
+                                                     "delta_D6391.3_normAUC","delta_D6391.4_normAUC",
+                                                     "delta_D6404.3_normAUC","delta_D6404.4_normAUC",
+                                                     "delta_D5733.3_normAUC","delta_D5733.4_normAUC",
+                                                     "delta_D6343.3_normAUC","delta_D6343.4_normAUC",
+                                                     "delta_D6271.3_normAUC","delta_D6271.4_normAUC",
+                                                     "delta_D5220.3_normAUC","delta_D5220.4_normAUC",
+                                                     "delta_D5417.3_normAUC","delta_D5417.4_normAUC",
+                                                     "delta_D5379.3_normAUC","delta_D5379.4_normAUC"
+                                                     ))
+
+
+p1 <- ggplot(temp[target=="SARS-CoV-2_WH1",], 
+             aes(site_SARS2,mutant))+geom_tile(aes(fill=value),color="black",lwd=0.1)+
+  scale_fill_gradientn(colours=c("#A94E35","#A94E35","#F48365","#FFFFFF","#7378B9","#383C6C","#383C6C"), #if showing blue color
+                       limits=c(-3,3),
+                       values=c(0/6,2/6,2.5/6,3/6,3.5/6,4/6,6/6), #effective coloring from -1 to +1
+                       na.value="gray70")+
+  # scale_fill_gradientn(colours=c("#A94E35","#A94E35","#F48365","#FFFFFF","#FFFFFF","#FFFFFF","#FFFFFF"), #if censoring >0 blue
+  #                      limits=c(-5,2),
+  #                      values=c(0/7,3/7,4/7,5/7,5.5/7,6/7, 7/7),
+  #                      na.value="gray70")+
+  #scale_x_continuous(expand=c(0,0),breaks=c(331,seq(335,530,by=5)))+
+  labs(x="",y="")+theme_classic(base_size=9)+
+  coord_equal()+theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.6,face="bold",size=10),axis.text.y=element_text(face="bold",size=10))+
+  facet_wrap(~measurement,ncol=1)+
+  guides(y.sec=guide_axis_label_trans())+
+  geom_text(aes(label=wildtype_indicator),size=2,color="gray10")+
+  theme(strip.text.x = element_text(size = 18))
+
+p1
+```
+
+<img src="collapse_barcodes_SARSr-DMS_files/figure-gfm/heatmap_DMS_delta-normAUC-by-sera_SARS-CoV-2_WH1-1.png" style="display: block; margin: auto;" />
+
+``` r
+invisible(dev.print(pdf, paste(config$final_variant_scores_dir,"/lib40_heatmap_SSM_delta-normAUC-by-sera_SARS-CoV-2_WH1.pdf",sep="")))
+```
+
+For SARS-CoV-2_XBB15:
+
+``` r
+p1 <- ggplot(temp[target=="SARS-CoV-2_XBB15",], 
+             aes(site_SARS2,mutant))+geom_tile(aes(fill=value),color="black",lwd=0.1)+
+  scale_fill_gradientn(colours=c("#A94E35","#A94E35","#F48365","#FFFFFF","#7378B9","#383C6C","#383C6C"), #if showing blue color
+                       limits=c(-3,3),
+                       values=c(0/6,2/6,2.5/6,3/6,3.5/6,4/6,6/6), #effective coloring from -1 to +1
+                       na.value="gray70")+
+  # scale_fill_gradientn(colours=c("#A94E35","#A94E35","#F48365","#FFFFFF","#FFFFFF","#FFFFFF","#FFFFFF"), #if censoring >0 blue
+  #                      limits=c(-5,2),
+  #                      values=c(0/7,3/7,4/7,5/7,5.5/7,6/7, 7/7),
+  #                      na.value="gray70")+
+  #scale_x_continuous(expand=c(0,0),breaks=c(331,seq(335,530,by=5)))+
+  labs(x="",y="")+theme_classic(base_size=9)+
+  coord_equal()+theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.6,face="bold",size=10),axis.text.y=element_text(face="bold",size=10))+
+  facet_wrap(~measurement,ncol=1)+
+  guides(y.sec=guide_axis_label_trans())+
+  geom_text(aes(label=wildtype_indicator),size=2,color="gray10")+
+  theme(strip.text.x = element_text(size = 18))
+
+p1
+```
+
+<img src="collapse_barcodes_SARSr-DMS_files/figure-gfm/heatmap_DMS_AUC-by-sera_SARS-CoV-2_XBB15-1.png" style="display: block; margin: auto;" />
+
+``` r
+invisible(dev.print(pdf, paste(config$final_variant_scores_dir,"/lib40_heatmap_SSM_delta-normAUC-by-sera_SARS-CoV-2_XBB15.pdf",sep="")))
+```
+
+For SARS-CoV-1_Urbani:
+
+``` r
+p1 <- ggplot(temp[target=="SARS-CoV-1_Urbani",], 
+             aes(site_SARS2,mutant))+geom_tile(aes(fill=value),color="black",lwd=0.1)+
+  scale_fill_gradientn(colours=c("#A94E35","#A94E35","#F48365","#FFFFFF","#7378B9","#383C6C","#383C6C"), #if showing blue color
+                       limits=c(-3,3),
+                       values=c(0/6,2/6,2.5/6,3/6,3.5/6,4/6,6/6), #effective coloring from -1 to +1
+                       na.value="gray70")+
+  # scale_fill_gradientn(colours=c("#A94E35","#A94E35","#F48365","#FFFFFF","#FFFFFF","#FFFFFF","#FFFFFF"), #if censoring >0 blue
+  #                      limits=c(-5,2),
+  #                      values=c(0/7,3/7,4/7,5/7,5.5/7,6/7, 7/7),
+  #                      na.value="gray70")+
+  #scale_x_continuous(expand=c(0,0),breaks=c(331,seq(335,530,by=5)))+
+  labs(x="",y="")+theme_classic(base_size=9)+
+  coord_equal()+theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.6,face="bold",size=10),axis.text.y=element_text(face="bold",size=10))+
+  facet_wrap(~measurement,ncol=1)+
+  guides(y.sec=guide_axis_label_trans())+
+  geom_text(aes(label=wildtype_indicator),size=2,color="gray10")+
+  theme(strip.text.x = element_text(size = 18))
+
+p1
+```
+
+<img src="collapse_barcodes_SARSr-DMS_files/figure-gfm/heatmap_DMS_AUC-by-sera_SARS-CoV-1_Urbani-1.png" style="display: block; margin: auto;" />
+
+``` r
+invisible(dev.print(pdf, paste(config$final_variant_scores_dir,"/lib40_heatmap_SSM_delta-normAUC-by-sera_SARS-CoV-1_Urbani.pdf",sep="")))
+```
+
+For PRD-0038:
+
+``` r
+p1 <- ggplot(temp[target=="PRD-0038",], 
+             aes(site_SARS2,mutant))+geom_tile(aes(fill=value),color="black",lwd=0.1)+
+  scale_fill_gradientn(colours=c("#A94E35","#A94E35","#F48365","#FFFFFF","#7378B9","#383C6C","#383C6C"), #if showing blue color
+                       limits=c(-3,3),
+                       values=c(0/6,2/6,2.5/6,3/6,3.5/6,4/6,6/6), #effective coloring from -1 to +1
+                       na.value="gray70")+
+  # scale_fill_gradientn(colours=c("#A94E35","#A94E35","#F48365","#FFFFFF","#FFFFFF","#FFFFFF","#FFFFFF"), #if censoring >0 blue
+  #                      limits=c(-5,2),
+  #                      values=c(0/7,3/7,4/7,5/7,5.5/7,6/7, 7/7),
+  #                      na.value="gray70")+
+  #scale_x_continuous(expand=c(0,0),breaks=c(331,seq(335,530,by=5)))+
+  labs(x="",y="")+theme_classic(base_size=9)+
+  coord_equal()+theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.6,face="bold",size=10),axis.text.y=element_text(face="bold",size=10))+
+  facet_wrap(~measurement,ncol=1)+
+  guides(y.sec=guide_axis_label_trans())+
+  geom_text(aes(label=wildtype_indicator),size=2,color="gray10")+
+  theme(strip.text.x = element_text(size = 18))
+
+p1
+```
+
+<img src="collapse_barcodes_SARSr-DMS_files/figure-gfm/heatmap_DMS_AUC-by-sera_PRD-0038-1.png" style="display: block; margin: auto;" />
+
+``` r
+invisible(dev.print(pdf, paste(config$final_variant_scores_dir,"/lib40_heatmap_SSM_delta-normAUC-by-sera_PRD-0038.pdf",sep="")))
+```
+
+Save output files.
+
+``` r
+dt_mutant[,.(target,wildtype,site,site_SARS2,mutant,mutation,mutation_SARS2,
+            D5338.3_AUC,sd_D5338.3_AUC,delta_D5338.3_AUC,delta_D5338.3_normAUC,n_bc_D5338.3_AUC,
+            D6391.3_AUC,sd_D6391.3_AUC,delta_D6391.3_AUC,delta_D6391.3_normAUC,n_bc_D6391.3_AUC,
+            D6404.3_AUC,sd_D6404.3_AUC,delta_D6404.3_AUC,delta_D6404.3_normAUC,n_bc_D6404.3_AUC,
+            D5733.3_AUC,sd_D5733.3_AUC,delta_D5733.3_AUC,delta_D5733.3_normAUC,n_bc_D5733.3_AUC,
+            D6343.3_AUC,sd_D6343.3_AUC,delta_D6343.3_AUC,delta_D6343.3_normAUC,n_bc_D6343.3_AUC,
+            D6271.3_AUC,sd_D6271.3_AUC,delta_D6271.3_AUC,delta_D6271.3_normAUC,n_bc_D6271.3_AUC,
+            D5220.3_AUC,sd_D5220.3_AUC,delta_D5220.3_AUC,delta_D5220.3_normAUC,n_bc_D5220.3_AUC,
+            D5417.3_AUC,sd_D5417.3_AUC,delta_D5417.3_AUC,delta_D5417.3_normAUC,n_bc_D5417.3_AUC,
+            D5379.3_AUC,sd_D5379.3_AUC,delta_D5379.3_AUC,delta_D5379.3_normAUC,n_bc_D5379.3_AUC,
+            D5338.4_AUC,sd_D5338.4_AUC,delta_D5338.4_AUC,delta_D5338.4_normAUC,n_bc_D5338.4_AUC,
+            D6391.4_AUC,sd_D6391.4_AUC,delta_D6391.4_AUC,delta_D6391.4_normAUC,n_bc_D6391.4_AUC,
+            D6404.4_AUC,sd_D6404.4_AUC,delta_D6404.4_AUC,delta_D6404.4_normAUC,n_bc_D6404.4_AUC,
+            D5733.4_AUC,sd_D5733.4_AUC,delta_D5733.4_AUC,delta_D5733.4_normAUC,n_bc_D5733.4_AUC,
+            D6343.4_AUC,sd_D6343.4_AUC,delta_D6343.4_AUC,delta_D6343.4_normAUC,n_bc_D6343.4_AUC,
+            D6271.4_AUC,sd_D6271.4_AUC,delta_D6271.4_AUC,delta_D6271.4_normAUC,n_bc_D6271.4_AUC,
+            D5220.4_AUC,sd_D5220.4_AUC,delta_D5220.4_AUC,delta_D5220.4_normAUC,n_bc_D5220.4_AUC,
+            D5417.4_AUC,sd_D5417.4_AUC,delta_D5417.4_AUC,delta_D5417.4_normAUC,n_bc_D5417.4_AUC,
+            D5379.4_AUC,sd_D5379.4_AUC,delta_D5379.4_AUC,delta_D5379.4_normAUC,n_bc_D5379.4_AUC,
+            expr,delta_expr)] %>%
+  mutate_if(is.numeric, round, digits=5) %>%
+  write.csv(file=config$final_variant_scores_dms_file, row.names=F,quote=F)
+```
