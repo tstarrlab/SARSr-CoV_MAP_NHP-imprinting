@@ -125,6 +125,7 @@ dt_site[,site_mean_D5220.4 := compute_site_avg(auc_vec=delta_D5220.4_normAUC, se
 dt_site[,site_mean_D5417.4 := compute_site_avg(auc_vec=delta_D5417.4_normAUC, sem_vec=sem_D5417.4_AUC),by=c("target","site")]
 dt_site[,site_mean_D5379.4 := compute_site_avg(auc_vec=delta_D5379.4_normAUC, sem_vec=sem_D5379.4_AUC),by=c("target","site")]
 
+
 dt_site <- unique(dt_site[,.(target,wildtype,site,site_SARS2,
                             site_mean_D5338.3,site_mean_D6391.3,site_mean_D6404.3,
                             site_mean_D5733.3,site_mean_D6343.3,site_mean_D6271.3,
@@ -132,6 +133,16 @@ dt_site <- unique(dt_site[,.(target,wildtype,site,site_SARS2,
                             site_mean_D5338.4,site_mean_D6391.4,site_mean_D6404.4,
                             site_mean_D5733.4,site_mean_D6343.4,site_mean_D6271.4,
                             site_mean_D5220.4,site_mean_D5417.4,site_mean_D5379.4)])
+
+
+#compute average score per site for the three samples ran of each sample group
+dt_site[,site_mean_WH1mono.3 := mean(c(site_mean_D5338.3, site_mean_D6391.3, site_mean_D6404.3),na.rm=T),by=c("target","site")]
+dt_site[,site_mean_WH1mono.4 := mean(c(site_mean_D5338.4, site_mean_D6391.4, site_mean_D6404.4),na.rm=T),by=c("target","site")]
+dt_site[,site_mean_tri.3 := mean(c(site_mean_D5733.3, site_mean_D6343.3, site_mean_D6271.3),na.rm=T),by=c("target","site")]
+dt_site[,site_mean_tri.4 := mean(c(site_mean_D5733.4, site_mean_D6343.4, site_mean_D6271.4),na.rm=T),by=c("target","site")]
+dt_site[,site_mean_tetra.3 := mean(c(site_mean_D5220.3, site_mean_D5417.3, site_mean_D5379.3),na.rm=T),by=c("target","site")]
+dt_site[,site_mean_tetra.4 := mean(c(site_mean_D5220.4, site_mean_D5417.4, site_mean_D5379.4),na.rm=T),by=c("target","site")]
+
 
 
 ```
@@ -379,7 +390,8 @@ pdb_wh1 <- read.pdb(file=config$pdb_6m0j)
 #iterate through backgrounds and metrics, output a pdb mapping the mean serum AUC to structure
 for(bg in c("SARS-CoV-2_WH1","SARS-CoV-2_XBB15","SARS-CoV-1_Urbani","PRD-0038")){
   for(serum in c("D5338.3","D6391.3","D6404.3","D5733.3","D6343.3","D6271.3","D5220.3","D5417.3","D5379.3",
-                 "D5338.4","D6391.4","D6404.4","D5733.4","D6343.4","D6271.4","D5220.4","D5417.4","D5379.4")){
+                 "D5338.4","D6391.4","D6404.4","D5733.4","D6343.4","D6271.4","D5220.4","D5417.4","D5379.4",
+                 "WH1mono.3","WH1mono.4","tri.3","tri.4","tetra.3","tetra.4")){
     b <- rep(0, length(pdb_wh1$atom$b))
     for(i in 1:nrow(pdb_wh1$atom)){
       if(pdb_wh1$atom$chain[i]=="E"){

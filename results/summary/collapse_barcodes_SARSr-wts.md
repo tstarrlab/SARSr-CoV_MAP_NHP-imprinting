@@ -845,6 +845,58 @@ p1
 invisible(dev.print(pdf, paste(config$final_variant_scores_dir,"/lib61_heatmap_AUC_extant_wildtypes.pdf",sep="")))
 ```
 
+Want to average the values across monkeys from the same condition
+
+``` r
+#compute averages across conditions
+
+dt_final[,mean_WH1mono_dose3_AUC:=mean(c(D5338.3_AUC,D6391.3_AUC,D6404.3_AUC),na.rm=T),by=c("library","target")]
+dt_final[,mean_WH1mono_dose4_AUC:=mean(c(D5338.4_AUC,D6391.4_AUC,D6404.4_AUC),na.rm=T),by=c("library","target")]
+
+dt_final[,mean_tri_dose3_AUC:=mean(c(D5733.3_AUC,D6343.3_AUC,D6271.3_AUC),na.rm=T),by=c("library","target")]
+dt_final[,mean_tri_dose4_AUC:=mean(c(D5733.4_AUC,D6343.4_AUC,D6271.4_AUC),na.rm=T),by=c("library","target")]
+
+dt_final[,mean_tetra_dose3_AUC:=mean(c(D5220.3_AUC,D5417.3_AUC,D5379.3_AUC),na.rm=T),by=c("library","target")]
+dt_final[,mean_tetra_dose4_AUC:=mean(c(D5220.4_AUC,D5417.4_AUC,D5379.4_AUC),na.rm=T),by=c("library","target")]
+
+
+#make temp long-form data frame
+temp3 <- data.table::melt(dt_final[,.(target,
+                                      mean_WH1mono_dose3_AUC, mean_WH1mono_dose4_AUC,
+                                      mean_tri_dose3_AUC, mean_tri_dose4_AUC,
+                                      mean_tetra_dose3_AUC, mean_tetra_dose4_AUC)],
+                          id.vars=c("target"),
+                          measure.vars=c("mean_WH1mono_dose3_AUC","mean_WH1mono_dose4_AUC",
+                                      "mean_tri_dose3_AUC","mean_tri_dose4_AUC",
+                                      "mean_tetra_dose3_AUC","mean_tetra_dose4_AUC"),
+                          variable.name="sera",value.name="AUC")
+
+#reorder mouse sera for display
+temp3$sera <- factor(temp3$sera,levels=c("mean_tetra_dose4_AUC","mean_tetra_dose3_AUC",
+                                         "mean_tri_dose4_AUC","mean_tri_dose3_AUC",
+                                         "mean_WH1mono_dose4_AUC","mean_WH1mono_dose3_AUC"))
+
+#make temp long-form data frame
+extant <- c(config$EurAf_extant,config$RsYN04_extant,config$SARS2_extant,config$SARS1_extant,config$Clade2_extant)
+
+temp3 <- temp3[target %in% extant,];temp3$target <- factor(temp3$target,levels=extant)
+
+p1 <- ggplot(temp3,aes(target,sera))+geom_tile(aes(fill=AUC),color="black",lwd=0.1)+
+  scale_fill_gradientn(colours=c("#FFFFFF","#FFFFFF","#003366"),limits=c(1,6),values=c(0,1/5,5/5),na.value="gray40")+ #effective range 2 to 6
+  #scale_fill_gradientn(colours=c("#FFFFFF","#003366"),limits=c(5,12),values=c(0,1),na.value="yellow")+
+  #scale_x_continuous(expand=c(0,0),breaks=c(331,seq(335,430,by=5)))+
+  labs(x="RBD homolog",y="")+theme_classic(base_size=9)+
+  coord_equal()+theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.6,face="bold"))
+
+p1
+```
+
+<img src="collapse_barcodes_SARSr-wts_files/figure-gfm/heatmap_wildtypes_extants_condition-averaged_AUC-1.png" style="display: block; margin: auto;" />
+
+``` r
+invisible(dev.print(pdf, paste(config$final_variant_scores_dir,"/lib61_heatmap_AUC_extant_wildtypes_condition-averaged.pdf",sep="")))
+```
+
 Save output file.
 
 ``` r
