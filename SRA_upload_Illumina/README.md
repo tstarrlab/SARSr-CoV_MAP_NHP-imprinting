@@ -22,7 +22,7 @@ You will now be at the *Sample Type* page, and you have to select the package th
 Click *Microbe*--although we are studying a pathogen it's not a direct clinical sample but an experiment using yeast on a pathogen, which is why we choose this sample type.
 Then click `Continue`.
 Now you enter the sample attributes.
-For the sample name, provide a short name that describes the sample, such as `sarbecovirus_PRD0038-serum-profiling`.
+For the sample name, provide a short name that describes the sample, such as `sarbecovirus_imprinted-serum-profiling`.
 Also provide the rest of the information:
 
   - Organism: Severe acute respiratory syndrome-related coronavirus
@@ -31,7 +31,7 @@ Also provide the rest of the information:
 
   - isolation source: plasmid
 
-  - collection date: 2023
+  - collection date: 2024
 
   - geographic location: USA
 
@@ -40,10 +40,10 @@ Also provide the rest of the information:
 Then hit `Continue`.
 You will now be on the page to specify the BioProject.
 We are adding to an existing BioProject, so enter [PRJNA714677](https://www.ncbi.nlm.nih.gov/bioproject/PRJNA714677) as the *Existing BioProject* and hit `Continue`.
-Finally, add a sample title, such as "Illumina barcode sequencing from PRD0038 serum binding profiling using yeast-displayed sarbecovirus RBDs."
+Finally, add a sample title, such as "Illumina barcode sequencing from imprinted NHP serum binding profiling using yeast-displayed sarbecovirus RBDs."
 Then hit `Continue`, make sure everything looks correct, then hit `Submit`.
 
-After a brief bit of processing, the *BioSample* submission should show up, along with a sample accession that will be in the format of *SAMN36715819*.
+After a brief bit of processing, the *BioSample* submission should show up, along with a sample accession that will be in the format of *SAMN46431257*.
 Add this sample accession to [upload_config.yaml](upload_config.yaml) as the value for the *biosample_accession* key.
 
 ## Upload the sequencing data
@@ -88,7 +88,7 @@ Click the option for *FTP or Aspera Command Line file preload*.
 
 If you click on the `+` FTP upload instructions, you will see details.
 Add the `Username` and `account folder` provided in these instructions to [upload_config.yaml](upload_config.yaml) as the values for the *ftp_username* and *ftp_account_folder* keys.
-Also add a value for the *ftp_subfolder* that is meaningful for this particular submission, such as *sarbecovirus_PRD0038-serum-profiling*.
+Also add a value for the *ftp_subfolder* that is meaningful for this particular submission, such as *sarbecovirus_imprinted-serum-profiling*.
 Finally, put the FTP password as plain text in a file called `ftp_password.txt` which is **not** tracked in this repo for privacy.
 
 ## Upload the sequencing data
